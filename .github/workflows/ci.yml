@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ['3.10', '3.11', '3.12']
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Compile
+        run: python -m compileall opp_axi
+
+      - name: Lint
+        run: |
+          python -m pip install --quiet 'ruff>=0.6'
+          ruff check .
+
+      - name: Unit tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Build the zipapp and smoke-test it
+        run: |
+          make build
+          ./dist/opp-axi.pyz --help
+
+      # The contract this repo exists to enforce: a connector that cannot be reached
+      # must refuse, never render as an empty result. On a bare runner every
+      # connector is down, so doctor must exit 1 — exit 0 here would be the bug.
+      - name: Doctor refuses when nothing is configured
+        run: |
+          set +e
+          timeout 120 ./dist/opp-axi.pyz doctor --json > doctor.json
+          rc=$?
+          set -e
+          echo "doctor exit: $rc"
+          if [ "$rc" -ne 1 ]; then
+            echo "FAIL: doctor exited $rc on an unconfigured runner; expected 1"
+            cat doctor.json
+            exit 1
+          fi
+          python -c "import json;d=json.load(open('doctor.json'));assert d['required_down'],'required_down must be non-empty'"
+
+  shell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Shellcheck
+        run: shellcheck scripts/install.sh

@@ -1,0 +1,49 @@
+name: Release
+
+# On a version tag, build the single-file zipapp and attach it to a GitHub Release.
+# Uses only the built-in Actions token + core release API — no GitHub Advanced
+# Security needed, so this works on a free private repo.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish opp-axi.pyz
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Build zipapp
+        run: make build
+
+      - name: Smoke-test the artifact
+        run: ./dist/opp-axi.pyz --help
+
+      # doctor is the promise this repo makes to a new user: it must run on a box
+      # where NOTHING is configured. Exit 1 is the correct answer there, so tolerate
+      # it — what must not happen is a crash or a hang.
+      - name: Doctor runs on a machine with nothing configured
+        run: |
+          timeout 120 ./dist/opp-axi.pyz doctor --json || rc=$?
+          if [ "${rc:-0}" -gt 1 ]; then echo "doctor exited $rc, expected 0 or 1"; exit 1; fi
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            dist/opp-axi.pyz \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes

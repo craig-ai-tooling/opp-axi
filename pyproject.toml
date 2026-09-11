@@ -1,0 +1,29 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "opp-axi"
+version = "0.1.0"
+description = "Agent-ergonomic CLI over Salesforce + Google Workspace for SE pipeline work."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []  # stdlib only; pyyaml is optional and only `triage` needs it
+
+[project.optional-dependencies]
+triage = ["pyyaml>=6"]
+dev = ["ruff>=0.6", "pyyaml>=6"]
+
+[project.scripts]
+opp-axi = "opp_axi.cli:run"
+
+[tool.hatch.build.targets.wheel]
+packages = ["opp_axi"]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+# E9 = syntax errors, F = pyflakes. The terse one-line style is deliberate for a
+# CLI this size, so E7 stays off — same call as launchpad-axi.
+select = ["E9", "F"]
