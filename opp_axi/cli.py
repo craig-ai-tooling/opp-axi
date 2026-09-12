@@ -220,6 +220,15 @@ STOP = {"corp", "inc", "llc", "ltd", "the", "company", "corporation", "group",
         "industries", "global", "partners", "communications", "companies", "worldwide",
         "consulting", "software", "hardware", "digital", "platform", "spectro", "cloud"}
 
+# Not stop words — these are real evidence when the domain agrees. But as a bare Gmail
+# `subject:` term they drag in every other account in the same industry, which is how
+# MedImpact Healthcare's evidence filled up with GE HealthCare threads. Used only to rank
+# subject search terms, never to block a match. Deliberately tight: "realty" and "travel"
+# are NOT here, because they are the only distinguishing token some accounts have.
+INDUSTRY = {"healthcare", "health", "medical", "insurance", "financial", "bank", "energy",
+            "retail", "foods", "brands", "pharma", "labs", "media", "telecom", "wireless",
+            "networks", "security", "analytics", "research", "logistics", "stores", "market"}
+
 
 def match_tokens(slug, account, aliases=()):
     toks = set()
@@ -235,27 +244,123 @@ def match_tokens(slug, account, aliases=()):
     return toks
 
 
-def build_matcher(idx):
-    table = [(slug, match_tokens(slug, _acct(d), d.get("aliases") or ()))
-             for slug, d in idx.items()]
+# Public suffixes seen on customer domains — used only to find the registrable label, so
+# "gehealthcare.com" -> "gehealthcare" and a token can never match on "com".
+_TLD1 = {"com", "net", "org", "io", "ai", "co", "us", "gov", "edu", "mil", "info", "biz"}
+_TLD2 = {"co.uk", "com.au", "co.jp", "co.nz", "com.br", "co.in", "com.mx"}
+_INFRA_LABELS = {"www", "mail", "smtp", "mx"}
 
-    def _hit(tok, hay):
-        """Short tokens/aliases (AB, ACME, 3xk) must match as WHOLE words — a prefix rule
-        makes 'ti' match 'time' and 'by' match every sentence. Longer ones allow suffixes."""
-        pat = r"\b" + re.escape(tok) + (r"\b" if len(tok) <= 4 else r"")
-        return re.search(pat, hay) is not None
+
+def domain_labels(domains):
+    """['connection.com;tom-is.com'] -> {'connection', 'tom-is', 'tomis'}.
+
+    Public suffix dropped. Hyphenated labels are returned both ways, because account names
+    lose the hyphen ("tom-is" vs "tomis")."""
+    out = set()
+    for chunk in re.split(r"[;,\s]+", " ".join(domains or []).lower()):
+        chunk = chunk.strip().strip(".")
+        if not chunk:
+            continue
+        parts = [p for p in chunk.split(".") if p]
+        if len(parts) >= 3 and ".".join(parts[-2:]) in _TLD2:
+            parts = parts[:-2]
+        elif len(parts) >= 2 and (parts[-1] in _TLD1 or len(parts[-1]) <= 3):
+            parts = parts[:-1]
+        for lab in parts:
+            if lab and lab not in _INFRA_LABELS:
+                out.add(lab)
+                out.add(lab.replace("-", ""))
+    return out
+
+
+def cover_vocab(slug, account, aliases=()):
+    """Every word an account owns, including STOP words and 2-3 char fragments.
+
+    Deliberately wider than match_tokens(): "ge" and "digital" are useless as standalone
+    evidence but are exactly the pieces needed to account for a whole domain label."""
+    out = set()
+    for src in (slug.replace("-", " "), account or "", " ".join(aliases)):
+        for w in re.split(r"[^A-Za-z0-9]+", (src or "").lower()):
+            if len(w) >= 2:
+                out.add(w)
+    return out
+
+
+def explicit_tokens(slug, aliases=()):
+    """Tokens the repo declared on purpose. These carry a domain match at any length,
+    so a short-but-real slug or alias (3xk, TI, GEHC) still matches its own domain."""
+    out = {(slug or "").lower().replace("-", "")}
+    out |= {w for w in re.split(r"[^A-Za-z0-9]+", (slug or "").lower()) if w}
+    out |= {a.strip().lower() for a in aliases if a and a.strip()}
+    return {t for t in out if t}
+
+
+def segmentable(label, vocab):
+    """Can `label` be built end-to-end out of this account's own words?
+
+    This is what separates GE HealthCare from MedImpact Healthcare on gehealthcare.com:
+    both own the word "healthcare", but only GE can also account for the leading "ge".
+    A substring test cannot tell them apart, and the old one did not try."""
+    n = len(label)
+    reach = [False] * (n + 1)
+    reach[0] = True
+    for i in range(n):
+        if not reach[i]:
+            continue
+        for j in range(i + 2, n + 1):          # no 1-char segments
+            if label[i:j] in vocab:
+                reach[j] = True
+    return reach[n]
+
+
+def norm_hay(text):
+    return re.sub(r"[^a-z0-9]+", " ", (text or "").lower())
+
+
+def text_hit(tok, hay):
+    """Short tokens/aliases must match as WHOLE words — a prefix rule makes 'ti' match
+    'time' and 'by' match every sentence. Longer ones allow suffixes. `hay` must already
+    be lowercased and punctuation-stripped by norm_hay()."""
+    pat = r"\b" + re.escape(tok) + (r"\b" if len(tok) <= 4 else r"")
+    return re.search(pat, hay) is not None
+
+
+def domain_hits(toks, vocab, explicit, domains):
+    """Tokens that legitimately match one of these domains.
+
+    A hit requires the account to explain the WHOLE registrable label and to contribute a
+    real token to it. The rule this replaces was `tok in " ".join(domains)` — an unanchored
+    substring test — so the token "health" matched gehealthcare.com and GE HealthCare
+    threads were served as evidence for MedImpact Healthcare, Elevance Health and Centauri
+    Health. Because a domain hit outranks every text hit, the wrong account won outright."""
+    hits = []
+    for lab in domain_labels(domains):
+        if not segmentable(lab, vocab):
+            continue
+        hits.extend(t for t in toks
+                    if (len(t) >= 4 or t in explicit)
+                    and (t == lab or lab.startswith(t) or lab.endswith(t)))
+    return sorted(set(hits))
+
+
+def build_matcher(idx):
+    table = []
+    for slug, d in idx.items():
+        acct = _acct(d)
+        aliases = d.get("aliases") or ()
+        table.append((slug, match_tokens(slug, acct, aliases),
+                      cover_vocab(slug, acct, aliases), explicit_tokens(slug, aliases)))
 
     def match(text, domains):
         """Best candidate, not first-in-dict-order. Domain evidence outranks text; among
         text matches, more distinct tokens wins, then the longest token."""
-        hay = re.sub(r"[^a-z0-9]+", " ", (text or "").lower())
-        dom = " ".join(domains).lower()
+        hay = norm_hay(text)
         best, best_score = "", ()
-        for slug, toks in table:
+        for slug, toks, vocab, expl in table:
             if not toks:
                 continue
-            dhits = [t for t in toks if t in dom]
-            hhits = [t for t in toks if _hit(t, hay)]
+            dhits = domain_hits(toks, vocab, expl, domains)
+            hhits = [t for t in toks if text_hit(t, hay)]
             if not (dhits or hhits):
                 continue
             score = (1 if dhits else 0, len(dhits or hhits),
@@ -887,10 +992,12 @@ def wispr_match(recs, toks, since, limit, snip):
         st = (m.get("start") or "")[:10]
         if not st or st < lo:
             continue
-        hay = re.sub(r"[^a-z0-9]+", " ",
-                     ((m.get("title") or "") + " " + (m.get("summary") or "")).lower())
-        if not any(re.search(r"\b" + re.escape(t) + (r"\b" if len(t) <= 4 else r""), hay)
-                   for t in toks):
+        hay = norm_hay((m.get("title") or "") + " " + (m.get("summary") or ""))
+        # Same rule as the calendar path: an industry word alone is not evidence. Without
+        # this, Elevance Health matched a meeting whose summary said "running healthy" —
+        # "health" is >4 chars, so the suffix-tolerant rule let it match "healthy".
+        hits = [t for t in toks if text_hit(t, hay)]
+        if not any(t not in INDUSTRY for t in hits):
             continue
         rows.append({"date": st[5:], "title": (m.get("title") or "")[:44],
                      "n": len(m.get("attendees") or []),
@@ -948,7 +1055,10 @@ def cmd_evidence(a):
     hi = datetime.now().date() + timedelta(days=1)
     g = gcli()
     if slug in idx:
-        toks = match_tokens(slug, _acct(idx[slug]), idx[slug].get("aliases") or ())
+        _al = idx[slug].get("aliases") or ()
+        toks = match_tokens(slug, _acct(idx[slug]), _al)
+        vocab = cover_vocab(slug, _acct(idx[slug]), _al)
+        expl = explicit_tokens(slug, _al)
         doms = known_domains(slug)
     else:
         # no repo dir (18 of your open opps): fall back to the SF opp Name's account part
@@ -956,6 +1066,7 @@ def cmd_evidence(a):
         nm = (recs[0]["Name"] if recs else "")
         slug = re.split(r"\s+-\s+", nm)[0].strip() or oid[:15]
         toks, doms = match_tokens("", slug), set()
+        vocab, expl = cover_vocab("", slug), explicit_tokens(slug)
     if not toks and not doms:
         die(f"no name tokens or known domains for {a.ref} — cannot match evidence safely. "
             f"Scaffold a dir with /new-opp, or pass a slug.", E_NOTFOUND)
@@ -970,12 +1081,22 @@ def cmd_evidence(a):
         atts = [x.get("email", "") for x in (ev.get("attendees") or [])]
         ext = sorted({e.split("@")[-1].lower() for e in atts
                       if "@" in e and not e.split("@")[-1].lower().endswith("spectrocloud.com")})
-        by_dom = any(d in ext for d in doms)
-        by_tok = any(t in summary.lower() for t in toks) or any(
-            any(t in d for t in toks) for d in ext)
+        by_dom = any(d in ext for d in doms) or bool(domain_hits(toks, vocab, expl, ext))
+        # Title matching is anchored now (`t in summary` matched "health" inside
+        # "HealthCare"), and a title hit on an industry word alone is not evidence: every
+        # account in the sector owns it. "Centauri Health Solutions" is not an Elevance
+        # Health meeting.
+        title_toks = [t for t in toks if text_hit(t, norm_hay(summary))]
+        by_tok = any(t not in INDUSTRY for t in title_toks)
         if not (by_dom or by_tok):
             continue
-        doms |= {d for d in ext if d not in FREEMAIL}          # learn
+        # Learn ONLY from domain evidence. Learning from a title match is what turned one
+        # loose row into a contaminated set: a single surname or industry word matched,
+        # its attendees' domains were adopted as the account's own, and every later meeting
+        # on those domains then matched by_dom — and the poisoned domains went on to drive
+        # the Gmail query too.
+        if by_dom:
+            doms |= {d for d in ext if d not in FREEMAIL}      # learn
         st = (ev.get("start") or {}).get("dateTime") or (ev.get("start") or {}).get("date") or ""
         cal_rows.append({"date": st[5:10], "summary": summary[:50],
                          "n": len(atts), "ext": ";".join(ext[:3])})
@@ -987,14 +1108,20 @@ def cmd_evidence(a):
     zoom_rows = []
     for m in gmail_search(g, f'from:no-reply@zoom.us after:{after}', a.limit, snip=200):
         subj = m["subject"].lower()
-        if not any(t in subj for t in toks):
+        if not any(text_hit(t, norm_hay(subj)) for t in toks):
             continue
         zoom_rows.append({"date": m["date"], "subject": m["subject"], "recap": m["snippet"]})
 
     # ── customer mail
     mail_rows = []
     if dl or toks:
-        terms = [f"from:{d} OR to:{d}" for d in dl] +                 [f'subject:{t}' for t in sorted(toks)[:2]]
+        # Search on distinctive tokens only. An industry word as a bare `subject:` term
+        # returns every account in the sector — `subject:healthcare` is what filled
+        # MedImpact's evidence with GE HealthCare threads. Fall back to one only if the
+        # account genuinely has nothing else.
+        distinct = [t for t in toks if t not in INDUSTRY]
+        subj_toks = sorted(distinct or toks, key=lambda t: (-len(t), t))[:2]
+        terms = [f"from:{d} OR to:{d}" for d in dl] +                 [f'subject:{t}' for t in subj_toks]
         q = (f'after:{after} ({" OR ".join(terms)}) -from:no-reply@zoom.us '
              '-subject:"Invitation:" -subject:"Canceled:" -subject:"Cancelled:" '
              '-subject:"Accepted:" -subject:"Declined:" -subject:"Updated invitation"')
