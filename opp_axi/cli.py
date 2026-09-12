@@ -1017,6 +1017,40 @@ def wispr_staleness(meta, window_end=None):
     return None
 
 
+def wispr_freshness(meta, window_end=None):
+    """Cache freshness as a fixed enum a caller can branch on, instead of grepping a
+    sentence: off | absent | stale | partial | ok. Same status vocabulary `doctor` already
+    uses for this connector (see _probe_wispr), plus `partial` — the case wispr_state()
+    collapses into "stale": the cache is fresh enough by whole days, but the window being
+    asked about extends past the sync instant, same rule as wispr_staleness() above.
+
+    Returns (status, detail) where `detail` is a short human reason, "" when status is ok.
+    """
+    if not WISPR_ENABLED:
+        return "off", "OPP_WISPR=off — meetings deliberately not searched"
+    ls = (meta or {}).get("last_sync")
+    if not ls:
+        return "absent", "cache never synced — meetings were NOT searched"
+    ts, date_only = wispr_sync_ts(meta)
+    if ts is None:
+        return "absent", "unreadable last_sync — run /wispr-sync"
+
+    now = datetime.now()
+    end = window_end or now
+    if end > now:
+        end = now
+
+    age_days = (now.date() - ts.date()).days
+    if age_days > WISPR_STALE_DAYS:
+        return "stale", f"{age_days}d old, last sync {ts.date()}"
+
+    gap_h = (end - ts).total_seconds() / 3600.0
+    if gap_h > WISPR_GAP_HOURS:
+        stamp = ts.strftime("%Y-%m-%d") if date_only else ts.strftime("%Y-%m-%d %H:%M")
+        return "partial", f"synced {stamp}, asked through {end.strftime('%Y-%m-%d %H:%M')} ({gap_h:.0f}h gap)"
+    return "ok", ""
+
+
 def wispr_match(recs, toks, since, limit, snip):
     rows = []
     lo = since.strftime("%Y-%m-%d")
@@ -1038,8 +1072,51 @@ def wispr_match(recs, toks, since, limit, snip):
     return rows[:limit]
 
 
+def _cmd_wispr_json(a, recs, meta):
+    """`wispr --json` — same gap/exit-code contract as the human path (wispr_line() below
+    still records the ledger entry that drives E_PARTIAL in main()), machine-readable.
+
+    FIELDS a caller can branch on instead of grepping a sentence:
+      cache.status     — off | absent | stale | partial | ok  (see wispr_freshness())
+      cache.last_sync  — raw last_sync string from the cache, or null if never synced
+      window           — the query window this run asked over
+    """
+    wispr_line(recs, meta)          # side effect only: records the gap ledger entry
+    st = wispr_state(recs, meta)
+    since = (datetime.strptime(a.since, "%Y-%m-%d").date() if a.since
+             else datetime.now().date() - timedelta(days=a.days))
+    status, detail = wispr_freshness(meta)
+    cache = {"status": status, "last_sync": (meta or {}).get("last_sync"),
+             "cached_count": len(recs), "detail": detail}
+    window = {"since": since.isoformat(), "days": a.days if not a.since else None}
+    base = {"version": __version__, "window": window, "cache": cache}
+
+    if st in ("off", "absent") or not recs:
+        print(json.dumps({**base, "meetings": [],
+                          "counts": {"meetings": 0, "matched": 0, "unmatched": 0}}, indent=2))
+        return
+
+    idx = opp_index()
+    match = build_matcher(idx)
+    rows, unmatched = [], 0
+    for m in sorted(recs, key=lambda r: r.get("start") or "", reverse=True):
+        mst = (m.get("start") or "")[:10]
+        if not mst or mst < since.strftime("%Y-%m-%d"):
+            continue
+        slug = match((m.get("title") or "") + " " + (m.get("summary") or "")[:200], [])
+        if not slug:
+            unmatched += 1
+        rows.append({"date": mst, "title": m.get("title") or "",
+                     "n": len(m.get("attendees") or []), "opp": slug or None})
+    print(json.dumps({**base, "meetings": rows,
+                      "counts": {"meetings": len(rows), "matched": len(rows) - unmatched,
+                                 "unmatched": unmatched}}, indent=2))
+
+
 def cmd_wispr(a):
     recs, meta = wispr_load()
+    if getattr(a, "json", False):
+        return _cmd_wispr_json(a, recs, meta)
     line = wispr_line(recs, meta)
     st = wispr_state(recs, meta)
     if st in ("off", "absent"):
@@ -1369,19 +1446,32 @@ def cmd_triage(a):
     _wr, _wm = wispr_load()
     stale = wispr_line(_wr, _wm)
 
-    emit(f"triage since={since} se={ME} patterns={len(patterns)}",
-         toon("findings", ["pattern", "slug", "why", "detail"], findings),
-         f"\nscanned:{scanned} deep:{deep} findings:{len(findings)}"
-         + (f" suppressed:{len(suppressed)}" if suppressed else ""),
-         # Withheld, never silent: a suppression nobody can see is indistinguishable
-         # from a pattern that quietly stopped working.
-         ("\n" + "\n".join(
-             f"  suppressed {f['pattern']} for {f['slug']} until {f['until']}: {f['why']}"
-             for f in suppressed) if suppressed else ""),
-         f"\n{stale}" if stale else "",
-         "\nNOTE: Slack is not searched. Patterns are data — edit patterns.yaml, not opp-axi.",
-         nxt("opp-axi triage --push  # queue these to the inbox",
-             "opp-axi evidence <slug>") if findings else nxt("nothing to queue"))
+    if getattr(a, "json", False):
+        # FIELDS a caller can branch on instead of regexing "suppressed X for Y until":
+        # `suppressed[]` states WHAT is suppressed (pattern), for WHOM (slug), UNTIL when.
+        wstatus, wdetail = wispr_freshness(_wm)
+        print(json.dumps({
+            "version": __version__, "since": since.isoformat(), "se": ME,
+            "scanned": scanned, "deep": deep,
+            "findings": findings,
+            "suppressed": suppressed,
+            "wispr_cache": {"status": wstatus, "last_sync": (_wm or {}).get("last_sync"),
+                            "detail": wdetail},
+        }, indent=2))
+    else:
+        emit(f"triage since={since} se={ME} patterns={len(patterns)}",
+             toon("findings", ["pattern", "slug", "why", "detail"], findings),
+             f"\nscanned:{scanned} deep:{deep} findings:{len(findings)}"
+             + (f" suppressed:{len(suppressed)}" if suppressed else ""),
+             # Withheld, never silent: a suppression nobody can see is indistinguishable
+             # from a pattern that quietly stopped working.
+             ("\n" + "\n".join(
+                 f"  suppressed {f['pattern']} for {f['slug']} until {f['until']}: {f['why']}"
+                 for f in suppressed) if suppressed else ""),
+             f"\n{stale}" if stale else "",
+             "\nNOTE: Slack is not searched. Patterns are data — edit patterns.yaml, not opp-axi.",
+             nxt("opp-axi triage --push  # queue these to the inbox",
+                 "opp-axi evidence <slug>") if findings else nxt("nothing to queue"))
 
     if a.push and findings:
         _push_to_inbox(findings)
@@ -1679,6 +1769,8 @@ def main():
     s = sub.add_parser("wispr", help="cached Wispr meetings, matched to opps")
     s.add_argument("--since", help="YYYY-MM-DD")
     s.add_argument("--days", type=int, default=7)
+    s.add_argument("--json", action="store_true",
+                  help="cache freshness (status enum, last_sync, window) as JSON")
     s.set_defaults(fn=cmd_wispr)
 
     s = sub.add_parser("triage", help="signal -> pattern -> proposed work")
@@ -1687,6 +1779,8 @@ def main():
     s.add_argument("--max-deep", type=int, default=15,
                    help="cap on opps that get the expensive evidence fan-out")
     s.add_argument("--push", action="store_true", help="queue findings to the dispatch inbox")
+    s.add_argument("--json", action="store_true",
+                  help="findings + suppression state (pattern, slug, until) as JSON")
     s.set_defaults(fn=cmd_triage)
 
     s = sub.add_parser("doctor", help="what is configured, what is missing, how to fix it")
