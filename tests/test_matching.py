@@ -8,7 +8,8 @@ the wrong domain and carried it into the Gmail query — one bad row contaminate
 """
 import unittest
 
-from opp_axi.cli import (INDUSTRY, build_matcher, cover_vocab, domain_hits, domain_labels,
+from opp_axi.cli import (INDUSTRY, PARTNER_DOMAINS, build_matcher, cover_vocab, domain_hits,
+                         domain_labels,
                          explicit_tokens, match_tokens, norm_hay, segmentable, text_hit)
 
 
@@ -115,6 +116,31 @@ class Matcher(unittest.TestCase):
     def test_text_only_still_works(self):
         self.assertEqual(self.match("Ivanti technical deep dive", []), "ivanti")
         self.assertEqual(self.match("Weekly sync", []), "")
+
+
+class PartnerDomains(unittest.TestCase):
+    """A partner sits on many unrelated deals, so its domain is a route to market, not an
+    account identity. SHI is on both Ivanti and Tesla; adopting shi.com as Ivanti's own
+    domain made Tesla's SHI call read as Ivanti evidence."""
+
+    def test_resellers_and_alliance_vendors_are_listed(self):
+        for d in ("shi.com", "cdw.com", "softwareone.com", "wwt.com", "purestorage.com"):
+            self.assertIn(d, PARTNER_DOMAINS)
+
+    def test_a_customer_domain_is_not_treated_as_a_partner(self):
+        for d in ("ivanti.com", "gehealthcare.com", "aunalytics.com", "tesla.com"):
+            self.assertNotIn(d, PARTNER_DOMAINS)
+
+    def test_partner_domain_does_not_match_an_unrelated_account(self):
+        toks, vocab, expl = _acct_parts("ivanti", "Ivanti")
+        self.assertEqual(domain_hits(toks, vocab, expl, ["shi.com", "everpuredata.com"]), [])
+
+    def test_customer_name_in_the_title_still_matches(self):
+        """The replacement signal for an internal meeting about a customer."""
+        idx = {"tesla": {"account_name": "Tesla"}, "ivanti": {"account_name": "Ivanti"}}
+        match = build_matcher(idx)
+        self.assertEqual(match("Internal - Tesla VMware PowWOW", ["shi.com"]), "tesla")
+        self.assertEqual(match("Ivanti Technical Deep Dive", []), "ivanti")
 
 
 if __name__ == "__main__":

@@ -810,12 +810,44 @@ def cmd_scaffold(a):
 
 
 FREEMAIL = {"gmail.com", "yahoo.com", "hotmail.com", "outlook.com", "icloud.com", "aol.com"}
+
+# Resellers, SIs and alliance vendors. They sit on many unrelated opportunities at once, so
+# their domain identifies a route to market, not an account — treating shi.com as Ivanti's
+# own domain made every SHI meeting, including Tesla's, look like Ivanti evidence. These are
+# never harvested from notes and never learned from a meeting.
+#
+# This only stops a partner domain standing in for an account's identity. An internal meeting
+# about a customer still matches on the customer's name in the title, which is where it
+# belongs. And if a partner is itself an opportunity, its own dir matches its own domain
+# through the normal token path — this list does not block that.
+#
+# Override with OPP_PARTNER_DOMAINS (comma-separated) to add or replace.
+PARTNER_DOMAINS = {
+    # resellers / distributors
+    "shi.com", "cdw.com", "softwareone.com", "wwt.com", "gdt.com", "insight.com",
+    "connection.com", "presidio.com", "ahead.com", "sirius.com", "computacenter.com",
+    "eplus.com", "trace3.com", "optiv.com", "carahsoft.com",
+    # SIs / consultancies
+    "deloitte.com", "accenture.com", "infosys.com", "wipro.com", "capgemini.com",
+    "kyndryl.com", "hcltech.com", "tcs.com",
+    # alliance / hardware / software vendors we co-sell with
+    "purestorage.com", "portworx.com", "amd.com", "nvidia.com", "intel.com",
+    "supermicro.com", "lenovo.com", "dell.com", "hpe.com", "netapp.com", "arista.com",
+    "snuc.com", "everpuredata.com",
+}
+if os.environ.get("OPP_PARTNER_DOMAINS"):
+    _p = {d.strip().lower() for d in os.environ["OPP_PARTNER_DOMAINS"].split(",") if d.strip()}
+    PARTNER_DOMAINS = _p if os.environ.get("OPP_PARTNER_DOMAINS_REPLACE") else PARTNER_DOMAINS | _p
 SKIP_DIRS = {".git", "node_modules", "site", ".terraform", "__pycache__", ".venv"}
 
 
 def known_domains(slug):
     """Customer email domains harvested from the opp's own notes — catches domains
-    that share no tokens with the account name (blue-widget -> bwtrading.com)."""
+    that share no tokens with the account name (blue-widget -> bwtrading.com).
+
+    Partner domains are skipped: a reseller's address in the notes means they are on the
+    deal, not that the deal is theirs, and adopting it pulls in every other opportunity
+    that partner touches."""
     doms = set()
     for fn in ("OPP.md", ".salesforce.json", "CLAUDE.md"):
         fp = os.path.join(REPO, slug, fn)
@@ -827,7 +859,7 @@ def known_domains(slug):
             continue
         for m in re.finditer(r"[A-Za-z0-9._%+-]+@([A-Za-z0-9.-]+\.[A-Za-z]{2,})", txt):
             d = m.group(1).lower().rstrip(".")
-            if d.endswith("spectrocloud.com") or d in FREEMAIL:
+            if d.endswith("spectrocloud.com") or d in FREEMAIL or d in PARTNER_DOMAINS:
                 continue
             doms.add(d)
     return doms
@@ -1096,7 +1128,9 @@ def cmd_evidence(a):
         # on those domains then matched by_dom — and the poisoned domains went on to drive
         # the Gmail query too.
         if by_dom:
-            doms |= {d for d in ext if d not in FREEMAIL}      # learn
+            # Learn customer domains only. A partner on the invite is a route to market, not
+            # the account — learning shi.com here is what made Tesla's SHI call read as Ivanti.
+            doms |= {d for d in ext if d not in FREEMAIL and d not in PARTNER_DOMAINS}
         st = (ev.get("start") or {}).get("dateTime") or (ev.get("start") or {}).get("date") or ""
         cal_rows.append({"date": st[5:10], "summary": summary[:50],
                          "n": len(atts), "ext": ";".join(ext[:3])})
