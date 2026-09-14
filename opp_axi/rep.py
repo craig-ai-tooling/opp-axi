@@ -533,7 +533,9 @@ def cmd_rep(a):
         return
 
     since_hint = (datetime.now().date() - timedelta(days=30)).strftime("%-m/%-d/%y")
-    blocks.append(cli.nxt(f"opp-axi rep {slug} --full", f"opp-axi rep {slug} --since {since_hint}",
+    # rep hints use the id, not the slug: `rep <slug>` resolves to the account's primary
+    # opp, which is not this one when the caller came in by id on a sibling.
+    blocks.append(cli.nxt(f"opp-axi rep {id15} --full", f"opp-axi rep {id15} --since {since_hint}",
                           f"opp-axi opp {slug}", f"opp-axi evidence {slug}"))
     cli.emit(*blocks)
 

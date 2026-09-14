@@ -385,6 +385,23 @@ class TestCmdRepDetail(GapCase):
             rep.cmd_rep(_ns_rep(section=["deal"]))
         self.assertNotIn("also open under", buf.getvalue())
 
+    def test_next_hints_use_the_opp_id_not_the_slug(self):
+        """`rep <slug>` resolves to the primary opp. On a multi-opp account a slug hint
+        would silently switch a caller who came in by id to a different opp."""
+        idx2 = {"acme": {"account_name": "Acme Corp", "opportunities": [
+            {"id": OID, "primary": True, "status": "open"},
+            {"id": "006BBBBBBBBBBBBBBB", "name": "Acme Corp - Expansion", "status": "open"},
+        ]}}
+        buf = io.StringIO()
+        with mock.patch.object(cli, "opp_index", return_value=idx2), \
+             mock.patch.object(cli, "sf_query", side_effect=_router()), \
+             contextlib.redirect_stdout(buf):
+            rep.cmd_rep(_ns_rep(section=["deal"]))
+        hint = next(ln for ln in buf.getvalue().splitlines() if ln.startswith("next:"))
+        self.assertIn(f"opp-axi rep {OID[:15]} --full", hint)
+        self.assertIn(f"opp-axi rep {OID[:15]} --since ", hint)
+        self.assertNotIn("opp-axi rep acme", hint)
+
     def test_meddpicc_status_companion_is_populated(self):
         """Regression: the SOQL field list must select the *_Status__c companion
         columns too, or `status` always reads back empty even when Salesforce has it."""

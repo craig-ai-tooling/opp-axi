@@ -74,11 +74,10 @@ class StateDirCase(unittest.TestCase):
 
 
 class TestVersionBump(unittest.TestCase):
-    def test_version_is_0_1_8(self):
-        # 0.1.7 was tagged from cos/opp-axi-brief-floors while this branch was open, so
-        # the scaffold fix here needs its own bump to reach the installed binary via
-        # release: 0.1.8.
-        self.assertEqual(__version__, "0.1.8")
+    def test_version_is_0_1_9(self):
+        # 0.1.8 was tagged from the scaffold pointer fix (#11) while feat/rep-read was
+        # open, so the rep verb needs its own bump to reach the installed binary: 0.1.9.
+        self.assertEqual(__version__, "0.1.9")
 
 
 class TestStateDir(StateDirCase):
