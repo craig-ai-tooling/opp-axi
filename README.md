@@ -116,7 +116,10 @@ opp-axi mail 'subject:X newer_than:2d'
 opp-axi evidence <ref>       # cal + zoom + mail + repo + wispr
 opp-axi wispr                # cached meetings, matched to opps
 opp-axi triage               # signal -> pattern -> proposed work
+opp-axi rep                  # what reps wrote across your open opps (read-only)
+opp-axi rep <ref>            # rep/AE-entered data on one opp: next steps, MEDDPICC, calls, notes, history
 opp-axi fields               # SE field reference
+opp-axi fields rep           # rep/AE-owned field reference (read-only)
 opp-axi doctor               # what is configured, what is not
 opp-axi brief <ref>          # a budgeted slice of OPP.md, not the whole file
 opp-axi log <ref> "text"     # append a dated Log entry without reading the file
