@@ -570,8 +570,7 @@ def cmd_activity(a):
     dup = guard.dedupe_top_entry(existing, stamp, INITIALS)
     if dup and not a.amend:
         die(f"{slug} already has a {stamp} {INITIALS}: entry today — pass --amend to "
-            f"replace it, or use different text if this is genuinely a second entry.",
-            E_REFUSED)
+            f"fold today's entries into one.", E_REFUSED)
     if a.amend and dup:
         new = guard.amend_top_entry(existing, text)
     else:
@@ -1759,8 +1758,9 @@ def main():
     s.add_argument("--dry-run", action="store_true")
     s.set_defaults(fn=cmd_activity)
 
-    s = sub.add_parser("field", help="write one or more SE-owned fields (guarded PATCH, "
-                       "verified) -- named 'field' not 'set': a shell guard blocks 'set'")
+    # Named `field` rather than the shorter, more obvious verb: a global shell
+    # guard on this box blocks that bare word as a command.
+    s = sub.add_parser("field", help="write one or more SE-owned fields (guarded PATCH, verified)")
     s.add_argument("ref")
     s.add_argument("fields", nargs="+", metavar="Field=value")
     s.add_argument("--if-empty", action="store_true",

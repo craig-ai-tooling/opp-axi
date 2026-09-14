@@ -16,6 +16,7 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 import unittest
 from datetime import datetime
 from unittest import mock
@@ -142,6 +143,47 @@ class TestGuardedPatch(StateDirCase):
         self.assertEqual(rec["status"], "mismatch")
         self.assertEqual(guard._load_writes()[-1]["status"], "mismatch")
 
+    def test_readback_crlf_and_trimmed_trailing_whitespace_still_verifies(self):
+        """Salesforce round-trips \\n as \\r\\n and trims trailing whitespace on
+        save. Without _same(), that reads back as a false `mismatch` on every
+        single write."""
+        record = {"Sales_Engineer_Overview__c": "OLD"}
+        fake_query, _ = _fake_sf(record)
+
+        def fake_patch_sf_style(opp_id, body):
+            sent = body["Sales_Engineer_Overview__c"]
+            record["Sales_Engineer_Overview__c"] = sent.replace("\n", "\r\n").rstrip()
+
+        with mock.patch.object(cli, "sf_query", side_effect=fake_query), \
+             mock.patch.object(guard, "sf_patch", side_effect=fake_patch_sf_style):
+            rec = guard.guarded_patch(OID, "acme", "Sales_Engineer_Overview__c",
+                                      "line one\nline two  \n", "OLD", reason="test")
+        self.assertEqual(rec["status"], "verified")
+        self.assertNotEqual(record["Sales_Engineer_Overview__c"], "line one\nline two  \n",
+                            "the fake backend must actually normalize, or this proves nothing")
+
+    def test_patch_failure_appends_failed_line_and_reraises(self):
+        """sf_patch dies via cli.die() -> SystemExit. A pending line with no
+        outcome would claim a write is still in flight when it never happened."""
+        record = {"Sales_Engineer_Overview__c": "OLD"}
+        fake_query, _ = _fake_sf(record)
+
+        def fake_patch_dies(opp_id, body):
+            cli.die("PATCH failed: simulated 500", cli.E_ERR)
+
+        with mock.patch.object(cli, "sf_query", side_effect=fake_query), \
+             mock.patch.object(guard, "sf_patch", side_effect=fake_patch_dies):
+            with self.assertRaises(SystemExit) as cm:
+                guard.guarded_patch(OID, "acme", "Sales_Engineer_Overview__c",
+                                    "NEW", "OLD", reason="test")
+            self.assertEqual(cm.exception.code, cli.E_ERR)
+
+        lines = guard._load_writes()
+        self.assertEqual(len(lines), 2)
+        self.assertEqual(lines[0]["status"], "pending")
+        self.assertEqual(lines[1]["status"], "failed")
+        self.assertEqual(lines[0]["id"], lines[1]["id"])
+
     def test_dry_run_writes_nothing(self):
         record = {"Sales_Engineer_Overview__c": "OLD"}
         fake_query, fake_patch = _fake_sf(record)
@@ -182,13 +224,47 @@ class TestAmendTopEntry(unittest.TestCase):
         self.assertEqual(out, "9/14/26 CS: replaced")
 
 
+class TestSame(unittest.TestCase):
+    """The value-equality helper every comparison in guard.py routes through."""
+
+    def test_none_and_empty_string_are_equal(self):
+        self.assertTrue(guard._same(None, ""))
+        self.assertTrue(guard._same("", None))
+        self.assertTrue(guard._same(None, None))
+
+    def test_crlf_normalized_before_comparing(self):
+        self.assertTrue(guard._same("a\r\nb", "a\nb"))
+
+    def test_trailing_whitespace_ignored(self):
+        self.assertTrue(guard._same("a\nb  \n", "a\nb"))
+
+    def test_genuinely_different_text_is_not_equal(self):
+        self.assertFalse(guard._same("a\nb", "a\nc"))
+
+    def test_non_string_values_compare_by_equality(self):
+        self.assertTrue(guard._same(True, True))
+        self.assertFalse(guard._same(True, False))
+        self.assertFalse(guard._same(False, ""))   # False is a fact, not "empty"
+
+
 class TestLint(unittest.TestCase):
     def test_correction_framing_fires(self):
         self.assertIn("correction-framing", guard.lint("correcting my earlier note"))
         self.assertIn("correction-framing", guard.lint("one thing that genuinely landed"))
 
-    def test_process_critique_fires(self):
-        self.assertIn("process-critique", guard.lint("the plan was never followed"))
+    def test_process_critique_fires_on_first_person_or_plan_phrasing(self):
+        self.assertIn("process-critique", guard.lint("We never sent the follow-up deck."))
+        self.assertIn("process-critique", guard.lint("We haven't followed up since the demo."))
+        self.assertIn("process-critique",
+                      guard.lint("Not following our process for POV signoff."))
+        self.assertIn("process-critique",
+                      guard.lint("The process was never documented for this account."))
+
+    def test_process_critique_does_not_fire_on_ordinary_customer_facts(self):
+        """A fact about the CUSTOMER's own progress is not process critique, even
+        though it contains 'not sent' / 'not followed'."""
+        self.assertEqual(guard.lint("Customer has not sent the RVTools export yet."), [])
+        self.assertEqual(guard.lint("Not followed up by the customer since 9/2."), [])
 
     def test_internal_pricing_fires(self):
         self.assertIn("internal-pricing", guard.lint("gave them a $5000 discount"))
@@ -197,9 +273,18 @@ class TestLint(unittest.TestCase):
         self.assertIn("internal-roadmap", guard.lint("this is on our roadmap for Q3"))
         self.assertIn("internal-roadmap", guard.lint("tracked as PE-1234"))
 
-    def test_internal_competitive_fires(self):
-        self.assertIn("internal-competitive", guard.lint("also evaluating Nutanix"))
-        self.assertIn("internal-competitive", guard.lint("comparing us to VMware Tanzu"))
+    def test_internal_competitive_fires_on_positioning_language(self):
+        self.assertIn("internal-competitive", guard.lint("Positioned to displace Rancher"))
+        self.assertIn("internal-competitive",
+                      guard.lint("Building the battlecard for this deal"))
+        self.assertIn("internal-competitive",
+                      guard.lint("Discussed our competitive takeout plan"))
+
+    def test_internal_competitive_does_not_fire_on_customer_platform_facts(self):
+        """The customer's current platform is a fact for Salesforce, not internal
+        battle-plan language -- Secondary_Environment_s__c even lists 'Nutanix
+        AHV' as a valid value."""
+        self.assertEqual(guard.lint("Customer runs OpenShift 4.14 and Nutanix AHV today."), [])
 
     def test_clean_text_lints_clean(self):
         self.assertEqual(guard.lint("met with the platform team, demoed live migration"), [])
@@ -427,6 +512,31 @@ class TestCmdUndo(StateDirCase):
             guard.cmd_undo(self._ns("w-does-not-exist"))
         self.assertEqual(cm.exception.code, cli.E_NOTFOUND)
 
+    def test_undo_proceeds_despite_sf_crlf_normalization(self):
+        """The field's live value differs from the recorded `new` only by CRLF +
+        trimmed trailing whitespace -- exactly what Salesforce does on save.
+        Without _same(), undo would refuse FOREVER because a raw compare never
+        matches again."""
+        record = {"Sales_Engineer_Overview__c": "OLD"}
+
+        def fake_query(soql, timeout=180):
+            return [dict(record)]
+
+        def fake_patch_sf_style(opp_id, body):
+            sent = body["Sales_Engineer_Overview__c"]
+            record["Sales_Engineer_Overview__c"] = sent.replace("\n", "\r\n").rstrip()
+
+        with mock.patch.object(cli, "sf_query", side_effect=fake_query), \
+             mock.patch.object(guard, "sf_patch", side_effect=fake_patch_sf_style):
+            rec = guard.guarded_patch(OID, "acme", "Sales_Engineer_Overview__c",
+                                      "new text\n", "OLD", reason="test")
+            self.assertEqual(rec["status"], "verified")
+            self.assertNotEqual(record["Sales_Engineer_Overview__c"], rec["new"],
+                                "the live value must genuinely differ byte-for-byte "
+                                "from the recorded `new`, or this proves nothing")
+            guard.cmd_undo(self._ns(rec["id"]))
+        self.assertEqual(record["Sales_Engineer_Overview__c"], "OLD")
+
     def test_undo_refuses_a_non_verified_write(self):
         with mock.patch.object(cli, "sf_query",
                                return_value=[{"Sales_Engineer_Overview__c": "CHANGED"}]):
@@ -474,6 +584,38 @@ class TestCmdWrites(StateDirCase):
             guard.cmd_writes(argparse.Namespace(since=None, opp="beta", json=True))
         rows = json.loads(buf.getvalue())
         self.assertEqual([r["slug"] for r in rows], ["beta"])
+
+    def test_since_buckets_by_local_time_not_utc_date(self):
+        """A write at 7pm Pacific time is stored as ~2am UTC the NEXT calendar
+        day. --since must compare against the day it happened LOCALLY, or a
+        late evening write gets filed under tomorrow."""
+        old_tz = os.environ.get("TZ")
+        os.environ["TZ"] = "America/Los_Angeles"
+        time.tzset()
+        try:
+            at_utc = "2026-09-15T02:00:00+00:00"   # 2026-09-14 19:00 PDT
+            with open(os.path.join(self.state_dir, "writes.jsonl"), "w") as f:
+                f.write(json.dumps({"id": "w-1", "at": at_utc, "slug": "acme",
+                                    "field": "Sales_Engineer_Overview__c",
+                                    "new": "hi", "status": "verified"}) + "\n")
+
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                guard.cmd_writes(argparse.Namespace(since="9/15/26", opp=None, json=True))
+            self.assertEqual(json.loads(buf.getvalue()), [],
+                             "a 7pm PT write must not be filed under the next UTC day")
+
+            buf2 = io.StringIO()
+            with contextlib.redirect_stdout(buf2):
+                guard.cmd_writes(argparse.Namespace(since="9/14/26", opp=None, json=True))
+            self.assertEqual(len(json.loads(buf2.getvalue())), 1,
+                             "the same write IS on-or-after 9/14 in local time")
+        finally:
+            if old_tz is None:
+                os.environ.pop("TZ", None)
+            else:
+                os.environ["TZ"] = old_tz
+            time.tzset()
 
 
 if __name__ == "__main__":

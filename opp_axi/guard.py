@@ -97,6 +97,24 @@ def _read_field(opp_id, field):
     return recs[0].get(field)
 
 
+def _same(a, b):
+    """Value equality tolerant of Salesforce's own normalization: None and "" are
+    the same fact (empty), and text differs only if it differs after CRLF and
+    trailing-whitespace normalization.
+
+    Without this, a successful write can read back as a false `mismatch` — a
+    textarea round-trips \\n as \\r\\n, or Salesforce trims trailing whitespace —
+    and `undo` then refuses FOREVER, because `current != rec["new"]` never
+    matches again even though nothing is actually wrong."""
+    if a is None:
+        a = ""
+    if b is None:
+        b = ""
+    if isinstance(a, str) and isinstance(b, str):
+        return a.replace("\r\n", "\n").rstrip() == b.replace("\r\n", "\n").rstrip()
+    return a == b
+
+
 # ── audit log ────────────────────────────────────────────────────────────────
 def _write_id():
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -161,7 +179,7 @@ def guarded_patch(opp_id, slug, field, new_value, expected_old, *, reason, allow
     """
     with _opp_lock(opp_id):
         current = _read_field(opp_id, field)
-        if current != expected_old:
+        if not _same(current, expected_old):
             cli.die(f"{field} on {slug} changed since read — re-run", cli.E_REFUSED)
 
         if dry_run:
@@ -182,9 +200,17 @@ def guarded_patch(opp_id, slug, field, new_value, expected_old, *, reason, allow
             "allow": list(allow),
         }
         _append_audit({**base, "status": "pending"})
-        sf_patch(opp_id, {field: new_value})
+        try:
+            sf_patch(opp_id, {field: new_value})
+        except SystemExit:
+            # cli.die() inside sf_patch already printed why. The pending line is
+            # otherwise the last word on this write, and it would say a PATCH
+            # that never happened is still in flight -- so close it out as
+            # `failed` before letting the exit propagate.
+            _append_audit({**base, "status": "failed"})
+            raise
         readback = _read_field(opp_id, field)
-        status = "verified" if readback == new_value else "mismatch"
+        status = "verified" if _same(readback, new_value) else "mismatch"
         record = {**base, "status": status}
         _append_audit(record)
         return record
@@ -214,10 +240,6 @@ def amend_top_entry(existing, new_entry):
     return new_entry + ("\n" + "\n".join(rest) if rest else "")
 
 
-# Competitors named in a customer-visible field. Kept as a plain word list, not a
-# regex, so adding one is a one-line diff. Case-insensitive, whole-word/whole-phrase.
-COMPETITORS = ("nutanix", "rancher", "openshift", "vmware tanzu", "mirantis")
-
 LINT_RULES = {
     # "correcting my earlier assessment" / "one thing that genuinely landed" — an SE
     # Activity entry states the current fact, never that it is fixing a previous one.
@@ -226,8 +248,13 @@ LINT_RULES = {
         re.compile(r"\bone thing .*\b(landed|missed)\b", re.I),
     ],
     # Process critique belongs in OPP.md, not a field the customer's own AE reads.
+    # First-person/plan phrasing only — "Customer has not sent the RVTools export
+    # yet" is a fact about the CUSTOMER'S progress, not process critique, and must
+    # not fire just because it contains "not sent".
     "process-critique": [
-        re.compile(r"\b(never|not) (sent|followed|following)\b", re.I),
+        re.compile(r"\bwe (never|didn't|did not|haven't|have not) (send|sent|follow|followed)\b",
+                   re.I),
+        re.compile(r"\b(not|never) following (the |our )?process\b", re.I),
         re.compile(r"\bthe (plan|process) (was|is) (never|not)\b", re.I),
     ],
     "internal-pricing": [
@@ -239,8 +266,13 @@ LINT_RULES = {
         re.compile(r"\bETA\b"),
         re.compile(r"\b(PE|PLT|PCP)-\d+\b"),
     ],
+    # Competitive-POSITIONING language, not the name of a competitor: a customer's
+    # current platform (OpenShift, Nutanix, VMware) is a fact that belongs in
+    # Salesforce -- Secondary_Environment_s__c even lists "Nutanix AHV" as a valid
+    # value. What does NOT belong is internal battle-plan language.
     "internal-competitive": [
-        re.compile(r"\b(" + "|".join(re.escape(c) for c in COMPETITORS) + r")\b", re.I),
+        re.compile(r"\b(battle ?cards?|displac(e|ed|ing)|"
+                   r"competitive (play|positioning|takeout)|win against)\b", re.I),
     ],
 }
 
@@ -345,7 +377,7 @@ def cmd_field(a):
     rows = []
     for api, _kind, value in pairs:
         current = r.get(api)
-        if a.if_empty and current not in (None, ""):
+        if a.if_empty and not _same(current, ""):
             rows.append({"field": api, "old": current, "new": value,
                          "status": "skipped-not-empty", "id": ""})
             continue
@@ -372,7 +404,7 @@ def cmd_undo(a):
         cli.die(f"write {a.write_id} is '{rec.get('status')}', not verified — refusing to undo",
                  cli.E_REFUSED)
     current = _read_field(rec["opp"], rec["field"])
-    if current != rec["new"]:
+    if not _same(current, rec["new"]):
         cli.die(f"{rec['field']} on {rec['slug']} no longer matches write {a.write_id} — "
                  f"refusing undo.\n  recorded: {cli.first_line(rec['new'] or '')}\n"
                  f"  current:  {cli.first_line(current or '')}", cli.E_REFUSED)
@@ -398,10 +430,10 @@ def _parse_mdy(s):
 def cmd_writes(a):
     latest = list(_latest_by_id(_load_writes()).values())
     if a.since:
-        cutoff = _parse_mdy(a.since)
+        cutoff = _parse_mdy(a.since)   # naive, local calendar date at 00:00
         latest = [r for r in latest
-                  if datetime.fromisoformat(r["at"].replace("Z", "+00:00")).replace(tzinfo=None)
-                  >= cutoff]
+                  if datetime.fromisoformat(r["at"].replace("Z", "+00:00"))
+                  .astimezone().replace(tzinfo=None) >= cutoff]
     if a.opp:
         latest = [r for r in latest if r.get("slug") == a.opp]
     latest.sort(key=lambda r: r.get("id", ""))
