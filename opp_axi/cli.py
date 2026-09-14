@@ -1648,9 +1648,10 @@ def cmd_fields(a):
         out.append(toon("repReadOnly", ["label", "api", "section"],
                         [dict(zip(("label", "api", "section"), f)) for f in FIELDS["rep"]]))
         out.append("\nrule: read-only: opp-axi reads rep fields, never writes them")
-    out.append("\nrules: REST PATCH only (sf data update -v writes null for emoji, mangles newlines) "
-               "| prepend SE Activity, never overwrite | write only where "
-               f"SA_Assignment_Oppty__c='{ME}' | always verify after write")
+    if sec in (None, "write", "never", "dead"):
+        out.append("\nrules: REST PATCH only (sf data update -v writes null for emoji, mangles newlines) "
+                   "| prepend SE Activity, never overwrite | write only where "
+                   f"SA_Assignment_Oppty__c='{ME}' | always verify after write")
     emit(*out, nxt("opp-axi fields write|never|dead|rep"))
 
 

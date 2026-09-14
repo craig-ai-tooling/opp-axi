@@ -212,6 +212,30 @@ class TestParseNextSteps(unittest.TestCase):
         self.assertEqual(e[0]["date"], "2025-12-20")
         self.assertEqual(e[0]["by"], "MB")
 
+    def test_dotted_date_with_year_parses(self):
+        e = rep.parse_next_steps("7.27.26 - Mesh - Spoke with Kurt at Blacklake.",
+                                 today=self.TODAY)
+        self.assertEqual(e, [{"date": "2026-07-27", "by": "",
+                              "text": "Mesh - Spoke with Kurt at Blacklake."}])
+
+    def test_dotted_date_full_year_parses(self):
+        e = rep.parse_next_steps("7.27.2026 update from partner.", today=self.TODAY)
+        self.assertEqual(e[0]["date"], "2026-07-27")
+
+    def test_yearless_dotted_number_is_not_a_date_stays_continuation(self):
+        """'1.5 million' must never be misread as a month.day date -- the dotted
+        format requires a year, unlike the slash/dash formats."""
+        text = "9/14/26 MB First entry.\n1.5 million VMs is the target."
+        e = rep.parse_next_steps(text, owner_initials=("MB",), today=self.TODAY)
+        self.assertEqual(len(e), 1, "the dotted year-less line must not start a new entry")
+        self.assertIn("1.5 million VMs is the target.", e[0]["text"])
+
+    def test_yearless_dotted_number_as_sole_undated_text(self):
+        e = rep.parse_next_steps("1.5 million VMs across decentralized sites.",
+                                 today=self.TODAY)
+        self.assertEqual(e, [{"date": None, "by": "",
+                              "text": "1.5 million VMs across decentralized sites."}])
+
     def test_crlf_line_endings(self):
         text = "9/14/26 MB First.\r\n9/1/26 MB Second.\r\n"
         e = rep.parse_next_steps(text, owner_initials=("MB",), today=self.TODAY)
@@ -289,10 +313,77 @@ class TestCmdRepDetail(GapCase):
                      "links", "activity", "notes", "files", "changes", "contacts"):
             self.assertIn(f"{name}[", out, f"missing section block: {name}")
         self.assertIn("source=salesforce (read-only)", out)
+        self.assertIn("narrative.empty:", out)
+        self.assertIn("links.empty:", out)
         self.assertEqual(cli._GAPS, [], "the happy path must not record a gap")
         m_run.assert_not_called()
         for call in m_run.call_args_list:
             self.assertNotIn("PATCH", " ".join(str(x) for x in call.args))
+
+    def test_narrative_and_links_only_render_populated_rows(self):
+        """OPP_REC: narrative has 3 populated fields (Description, Current/Desired
+        Technical State) of 9; all 4 link fields are empty."""
+        buf = io.StringIO()
+        with mock.patch.object(cli, "opp_index", return_value=IDX), \
+             mock.patch.object(cli, "sf_query", side_effect=_router()), \
+             contextlib.redirect_stdout(buf):
+            rep.cmd_rep(_ns_rep(section=["narrative"]))
+        out = buf.getvalue()
+        self.assertIn("narrative[3]", out)
+        self.assertIn("links[0]", out)
+        self.assertIn("links.empty: Executive Summary, Account Plan, "
+                      "Mutual Action Plan, Value Hypothesis", out)
+        self.assertNotIn("(all populated)", out.split("links.empty:")[0].split("\n")[-1])
+
+    def test_narrative_and_links_json_shape_is_rows_and_empty(self):
+        buf = io.StringIO()
+        with mock.patch.object(cli, "opp_index", return_value=IDX), \
+             mock.patch.object(cli, "sf_query", side_effect=_router()), \
+             contextlib.redirect_stdout(buf):
+            rep.cmd_rep(_ns_rep(section=["narrative"], json=True))
+        out = json.loads(buf.getvalue())
+        self.assertEqual(set(out["narrative"].keys()), {"rows", "empty"})
+        self.assertEqual(set(out["links"].keys()), {"rows", "empty"})
+        self.assertEqual(len(out["links"]["rows"]), 0)
+        self.assertEqual(len(out["links"]["empty"]), 4)
+
+    def test_sibling_open_opps_listed_and_excluded_when_closed(self):
+        """tesla/toyota/aunalytics each carry more than one open opp under one slug --
+        the resolved opp's siblings must be surfaced (id + name), and a non-open
+        sibling must not appear."""
+        oid2, oid3 = "006BBBBBBBBBBBBBBB", "006CCCCCCCCCCCCCCC"
+        idx2 = {"acme": {"account_name": "Acme Corp", "opportunities": [
+            {"id": OID, "primary": True, "status": "open"},
+            {"id": oid2, "name": "Acme Corp - Expansion", "status": "open"},
+            {"id": oid3, "name": "Acme Corp - Closed Deal", "status": "closed"},
+        ]}}
+        buf = io.StringIO()
+        with mock.patch.object(cli, "opp_index", return_value=idx2), \
+             mock.patch.object(cli, "sf_query", side_effect=_router()), \
+             contextlib.redirect_stdout(buf):
+            rep.cmd_rep(_ns_rep(section=["deal"]))
+        out = buf.getvalue()
+        expect = (f"also open under acme: {oid2[:15]} Acme Corp - Expansion — "
+                 f"opp-axi rep {oid2[:15]}")
+        self.assertIn(expect, out)
+        self.assertNotIn(oid3[:15], out, "a closed sibling must not be listed")
+
+        buf2 = io.StringIO()
+        with mock.patch.object(cli, "opp_index", return_value=idx2), \
+             mock.patch.object(cli, "sf_query", side_effect=_router()), \
+             contextlib.redirect_stdout(buf2):
+            rep.cmd_rep(_ns_rep(section=["deal"], json=True))
+        out2 = json.loads(buf2.getvalue())
+        self.assertEqual(out2["opp"]["siblings"],
+                         [{"id": oid2[:15], "name": "Acme Corp - Expansion"}])
+
+    def test_no_siblings_when_only_one_open_opp(self):
+        buf = io.StringIO()
+        with mock.patch.object(cli, "opp_index", return_value=IDX), \
+             mock.patch.object(cli, "sf_query", side_effect=_router()), \
+             contextlib.redirect_stdout(buf):
+            rep.cmd_rep(_ns_rep(section=["deal"]))
+        self.assertNotIn("also open under", buf.getvalue())
 
     def test_meddpicc_status_companion_is_populated(self):
         """Regression: the SOQL field list must select the *_Status__c companion
@@ -379,8 +470,10 @@ class TestRollup(GapCase):
             rep.cmd_rep(_ns_rep(ref=None))
         out = buf.getvalue()
         self.assertIn("reps[1]", out)
+        self.assertIn(OID[:15], out)   # id column -- a slug alone can be ambiguous
         self.assertIn("acme", out)
         self.assertIn("open:1", out)
+        self.assertIn("opp-axi rep <id>", out)
 
     def test_zero_records_renders_definitive_none(self):
         buf = io.StringIO()
@@ -389,8 +482,21 @@ class TestRollup(GapCase):
              contextlib.redirect_stdout(buf):
             rep.cmd_rep(_ns_rep(ref=None))
         self.assertIn(
-            "reps[0]{slug,owner,stage,forecast,updated,daysStale,latest}: (none)",
+            "reps[0]{id,slug,owner,stage,forecast,updated,daysStale,latest}: (none)",
             buf.getvalue())
+
+    def test_json_rows_carry_id(self):
+        recs = [{"Id": OID, "Name": "Acme", "Owner": {"Name": "Matthew Byram"},
+                "StageName": "Prove Value", "Forecast_Status__c": "On Track",
+                "Next_Steps_Last_Updated__c": "2026-09-10T00:00:00.000+0000",
+                "Next_Steps__c": "9/10/26 MB Checked in."}]
+        buf = io.StringIO()
+        with mock.patch.object(cli, "opp_index", return_value=IDX), \
+             mock.patch.object(cli, "sf_query", return_value=recs), \
+             contextlib.redirect_stdout(buf):
+            rep.cmd_rep(_ns_rep(ref=None, json=True))
+        out = json.loads(buf.getvalue())
+        self.assertEqual(out["reps"][0]["id"], OID[:15])
 
 
 # ── 11: fields rep ────────────────────────────────────────────────────────────
@@ -402,6 +508,24 @@ class TestFieldsRep(unittest.TestCase):
         out = buf.getvalue()
         self.assertIn("repReadOnly[", out)
         self.assertIn("read-only: opp-axi reads rep fields, never writes them", out)
+
+    def test_fields_rep_alone_omits_the_se_write_rules_line(self):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            cli.cmd_fields(argparse.Namespace(section="rep"))
+        self.assertNotIn("REST PATCH only", buf.getvalue())
+
+    def test_fields_bare_still_shows_write_rules_line(self):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            cli.cmd_fields(argparse.Namespace(section=None))
+        self.assertIn("REST PATCH only", buf.getvalue())
+
+    def test_fields_write_shows_write_rules_line(self):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            cli.cmd_fields(argparse.Namespace(section="write"))
+        self.assertIn("REST PATCH only", buf.getvalue())
 
 
 if __name__ == "__main__":

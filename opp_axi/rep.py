@@ -1,4 +1,4 @@
-"""opp_axi/rep.py — rep/AE-entered Salesforce Opportunity data. READ-ONLY BY DESIGN.
+"""opp_axi/rep.py — rep/AE-entered Salesforce Opportunity data. READ-ONLY.
 
 opp-axi's other verbs (`opp`, `field`, `activity`) read and write the handful of
 Opportunity fields the SE owns. Everything else on the Opportunity — Stage, Amount,
@@ -6,14 +6,11 @@ Close Date, Next Steps, MEDDPICC, qualification, narrative fields, rep call logs
 Lightning Notes, field history, contact roles — belongs to the account rep/AE. Craig
 needs to READ that data to build an accurate status update; he must never write it.
 
-This module enforces that split structurally: it never reaches into opp_axi's write
-guard, never issues a Salesforce state-changing request of any kind (create, modify or
-remove). Every read goes through `cli.sf_query()` (a SOQL SELECT) or, for a Lightning
-Note's full body only, `cli._run()` with a bare, argument-free "sf api request rest ...
-VersionData" call — a plain retrieval, with none of the extra flag the guard module's
-one write helper always supplies to turn a request into a change. `tests/test_rep.py`
-pins this with both a static source-text check and a companion test in the guard
-module's own suite that every field in `cli.FIELDS["rep"]` is refused by `field`.
+Reads go through `cli.sf_query()` (SOQL) plus one plain GET per Lightning Note body
+(`cli._run()` against .../ContentVersion/<id>/VersionData). This module never touches
+opp_axi's write guard and issues no Salesforce write of any kind. `tests/test_rep.py`
+statically forbids the write helpers in this file, and separately checks that every
+field in `cli.FIELDS["rep"]` is refused by `field`.
 
 Same module-import pattern as guard.py: `from opp_axi import cli` binds the module
 object, and only function bodies touch its attributes, so cli.py -> rep.py ->
@@ -31,11 +28,14 @@ from opp_axi import cli
 # ── Next Steps parsing ───────────────────────────────────────────────────────
 # Next_Steps__c is a free-text, newest-first dated log the AE maintains by hand.
 # Real formats seen live: "9/14/2026 MB ...", "9/14/26 DF - ...", "2026-09-14: ...",
-# "9-12-2026 - MN - ...", "8/17 MNDA signed- ..." (no year), CRLF line endings, blank
-# lines, and inline run-ons where a second dated entry starts mid-line after 2+ spaces.
+# "9-12-2026 - MN - ...", "8/17 MNDA signed- ..." (no year), "7.27.26 - Mesh - ..."
+# (dotted, year REQUIRED -- a year-less dotted number like "1.5 million" must never be
+# read as a date), CRLF line endings, blank lines, and inline run-ons where a second
+# dated entry starts mid-line after 2+ spaces.
 _LEAD_DATE = re.compile(
     r"^(?:"
     r"(?P<iso_y>\d{4})-(?P<iso_m>\d{1,2})-(?P<iso_d>\d{1,2})"
+    r"|(?P<dot_m>\d{1,2})\.(?P<dot_d>\d{1,2})\.(?P<dot_y>\d{2,4})"
     r"|(?P<us_m>\d{1,2})[/-](?P<us_d>\d{1,2})(?:[/-](?P<us_y>\d{2,4}))?"
     r")"
 )
@@ -61,6 +61,10 @@ def _lead_date_iso(m, today):
     """The regex match for a leading date -> 'YYYY-MM-DD', or None if not a real date."""
     if m.group("iso_y"):
         y, mo, d = int(m.group("iso_y")), int(m.group("iso_m")), int(m.group("iso_d"))
+    elif m.group("dot_y"):
+        mo, d, y = int(m.group("dot_m")), int(m.group("dot_d")), int(m.group("dot_y"))
+        if y < 100:
+            y += 2000
     else:
         mo, d = int(m.group("us_m")), int(m.group("us_d"))
         y_raw = m.group("us_y")
@@ -270,10 +274,15 @@ LINKS_ROWS = [
     ("Value Hypothesis", "Value_Hypothesis__c"),
 ]
 
+# Days_Since_Next_Steps_Update__c is deliberately NOT selected here -- it is a
+# Salesforce formula field that can disagree with a same-day local calculation by a
+# day depending on time-of-day. `daysStale` below is computed locally from
+# Next_Steps_Last_Updated__c, the same way the rollup computes it, so the two views
+# never disagree. (It stays in cli.FIELDS["rep"] as a documented, readable field.)
 DEAL_FIELDS = [
     "StageName", "Amount", "CloseDate", "ForecastCategoryName", "Forecast_Status__c",
     "Probability__c", "Confidence__c", "Deal_Qualification_Health__c",
-    "Next_Steps_Last_Updated__c", "Days_Since_Next_Steps_Update__c",
+    "Next_Steps_Last_Updated__c",
     "Account_Executive__c", "Use_Case_Primary__c", "LeadSource",
     "Partner__r.Name", "SDR_of_Record__r.Name",
 ]
@@ -316,12 +325,29 @@ def cmd_rep(a):
     owner = _rel_name(r, "Owner")
     se = r.get("SA_Assignment_Oppty__c") or ""
     owner_initials = (_owner_initials_of(owner),) if owner else ()
+    id15 = r["Id"][:15]
 
-    blocks = [f"rep id={r['Id'][:15]} slug={slug} owner={owner} se={se} "
+    # Other OPEN opps under the same repo dir -- several accounts (tesla, toyota,
+    # aunalytics) carry more than one, so a bare slug alone is ambiguous. Sourced from
+    # idx only (already loaded above); no extra query.
+    siblings = []
+    if slug in idx:
+        for o in idx[slug].get("opportunities", []) or []:
+            sib_id = (o.get("id") or "")[:15]
+            if not sib_id or sib_id == id15:
+                continue
+            if (o.get("status") or "open") != "open":
+                continue
+            siblings.append({"id": sib_id, "name": o.get("name") or ""})
+
+    blocks = [f"rep id={id15} slug={slug} owner={owner} se={se} "
               "source=salesforce (read-only)",
               f"name: {r.get('Name')}"]
-    j = {"opp": {"id": r["Id"][:15], "slug": slug, "name": r.get("Name"),
-                "owner": owner, "se": se}}
+    for sib in siblings:
+        blocks.append(f"also open under {slug}: {sib['id']} {sib['name']} — "
+                      f"opp-axi rep {sib['id']}")
+    j = {"opp": {"id": id15, "slug": slug, "name": r.get("Name"),
+                "owner": owner, "se": se, "siblings": siblings}}
 
     if "deal" in wanted:
         deal = {
@@ -334,7 +360,7 @@ def cmd_rep(a):
             "partner": _rel_name(r, "Partner__r"), "isr": _rel_name(r, "SDR_of_Record__r"),
             "useCase": r.get("Use_Case_Primary__c"),
             "nextStepsUpdated": r.get("Next_Steps_Last_Updated__c"),
-            "daysStale": r.get("Days_Since_Next_Steps_Update__c"),
+            "daysStale": _days_stale(_iso_date(r.get("Next_Steps_Last_Updated__c")), today),
         }
         blocks.append(cli.toon("deal", list(deal.keys()), [{
             **deal, "close": _mdy(deal["close"]), "nextStepsUpdated": _mdy(deal["nextStepsUpdated"]),
@@ -381,16 +407,33 @@ def cmd_rep(a):
                               "empty": empty}
 
     if "narrative" in wanted:
-        rows = []
+        rows, empty = [], []
         for label, api in NARRATIVE_ROWS:
             full_val = r.get(api) or ""
+            if not full_val:
+                empty.append(label)
+                continue
             shown_val = full_val if a.full else full_val[:300]
             rows.append({"field": label, "value": shown_val + cli.size_hint(full_val, shown_val)})
         blocks.append(cli.toon("narrative", ["field", "value"], rows))
-        link_rows = [{"field": label, "url": r.get(api) or ""} for label, api in LINKS_ROWS]
+        blocks.append(f"narrative.empty: {', '.join(empty) if empty else '(all populated)'}")
+
+        link_rows, link_empty = [], []
+        for label, api in LINKS_ROWS:
+            url = r.get(api) or ""
+            if not url:
+                link_empty.append(label)
+                continue
+            link_rows.append({"field": label, "url": url})
         blocks.append(cli.toon("links", ["field", "url"], link_rows))
-        j["narrative"] = [{"field": lbl, "value": r.get(api) or ""} for lbl, api in NARRATIVE_ROWS]
-        j["links"] = [{"field": lbl, "url": r.get(api) or ""} for lbl, api in LINKS_ROWS]
+        blocks.append(f"links.empty: {', '.join(link_empty) if link_empty else '(all populated)'}")
+
+        j["narrative"] = {"rows": [{"field": lbl, "value": r.get(api) or ""}
+                                   for lbl, api in NARRATIVE_ROWS if r.get(api)],
+                          "empty": empty}
+        j["links"] = {"rows": [{"field": lbl, "url": r.get(api) or ""}
+                               for lbl, api in LINKS_ROWS if r.get(api)],
+                     "empty": link_empty}
 
     if "activity" in wanted:
         tasks = cli.sf_query(
@@ -523,8 +566,7 @@ def _cv_row(cv, is_note=True):
 
 
 def _note_body(version_id):
-    """The full body of one Lightning Note via a plain, read-only retrieval of its
-    VersionData -- no extra flag is added to turn this into a write.
+    """The full body of one Lightning Note: a plain, read-only GET of its VersionData.
     Returns (body, error) -- error is '' on success."""
     p = cli._run(["sf", "api", "request", "rest",
                  f"/services/data/{cli.API}/sobjects/ContentVersion/{version_id}/VersionData",
@@ -561,7 +603,10 @@ def _rollup(a):
             continue
         entries = parse_next_steps(ns_text, (_owner_initials_of(owner),) if owner else (), today)
         latest = entries[0] if entries else None
-        raw.append({"slug": i2s.get(r["Id"][:15], "-"), "owner": owner,
+        # Several accounts (tesla, toyota, aunalytics) carry more than one open opp, so
+        # the slug alone is ambiguous -- the id is the thing `opp-axi rep <id>` resolves
+        # unambiguously.
+        raw.append({"id": r["Id"][:15], "slug": i2s.get(r["Id"][:15], "-"), "owner": owner,
                    "stage": r.get("StageName"), "forecast": r.get("Forecast_Status__c"),
                    "updated": updated_iso, "daysStale": stale, "latest": latest})
 
@@ -584,14 +629,14 @@ def _rollup(a):
             latest_str = f"{d} {txt}".strip()
         else:
             latest_str = ""
-        rows.append({"slug": x["slug"], "owner": x["owner"], "stage": x["stage"],
+        rows.append({"id": x["id"], "slug": x["slug"], "owner": x["owner"], "stage": x["stage"],
                     "forecast": x["forecast"], "updated": _mdy(x["updated"]),
                     "daysStale": x["daysStale"] if x["daysStale"] is not None else "",
                     "latest": latest_str})
 
     cli.emit(f"rep rollup se={cli.ME}",
-             cli.toon("reps", ["slug", "owner", "stage", "forecast", "updated", "daysStale",
-                               "latest"], rows),
+             cli.toon("reps", ["id", "slug", "owner", "stage", "forecast", "updated",
+                               "daysStale", "latest"], rows),
              f"\nopen:{len(recs)} updated<=7d:{updated7} stale>14d:{stale14} "
              f"noNextSteps:{nosteps}",
-             cli.nxt("opp-axi rep <slug>", "opp-axi rep <slug> --full"))
+             cli.nxt("opp-axi rep <id>", "opp-axi rep <id> --full"))
