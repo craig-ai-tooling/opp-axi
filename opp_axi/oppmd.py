@@ -227,6 +227,17 @@ def _read(path):
 
 
 # ── brief ──────────────────────────────────────────────────────────────────
+# Budget priority, most protected first: frontmatter (never cut) -> Log headlines
+# (floor: the 10 newest in-window, or all if fewer — the most valuable thing in a
+# brief) -> Snapshot (floor: its first paragraph/bullet) -> Decisions -> Risks ->
+# any extra --section. Trimming spends in the opposite order: extra sections first,
+# then Risks, then Decisions, then Snapshot down to its floor, and only THEN log
+# headlines, oldest first, down to their floor. Sections are cut at whole
+# paragraph/bullet boundaries — never mid-word — and a dated bullet list (Decisions)
+# drops its oldest bullets first, keeping the newest. Floors are a preference, not a
+# license to blow the budget: if a budget is small enough that every floor is spent
+# and it still does not fit, the last resort is Snapshot's protected paragraph, then
+# the headline floor itself — the hard byte cap always wins in the end.
 def _cut_note(cut_logs, cut_bytes, budget):
     bits = []
     if cut_logs:
@@ -242,6 +253,89 @@ def _nxt(slug):
     return ("next: opp-axi brief " + slug + " --since <date> | "
             "opp-axi brief " + slug + " --grep <regex> | "
             "opp-axi brief " + slug + " --full")
+
+
+def _section_priority(requested_name):
+    """0 = Snapshot-tier (most protected), 1 = Decisions-tier, 2 = Risks-tier, 3 =
+    anything else asked for via --section (least protected, cut first). Matches on
+    the name the caller asked for, not the file's own (possibly longer) heading."""
+    low = requested_name.strip().lower()
+    if low.startswith("snapshot"):
+        return 0
+    if low.startswith("decision"):
+        return 1
+    if low.startswith("risk"):
+        return 2
+    return 3
+
+
+def _split_blocks(body):
+    """A section body -> ('bullets'|'paragraphs', [block, ...]) in file order. A block
+    is one top-level '- ' bullet (plus any indented continuation) if bullets make up
+    at least half the section's non-blank lines, else one blank-line-separated
+    paragraph. Trimming only ever drops a whole block, so a cut never lands mid-word."""
+    lines = body.split("\n")
+    nonblank = [ln for ln in lines if ln.strip()]
+    dash_top = sum(1 for ln in lines if ln.startswith("- "))
+    if dash_top and dash_top >= max(1, len(nonblank) // 2):
+        blocks, cur = [], []
+        for ln in lines:
+            if ln.startswith("- "):
+                if cur:
+                    blocks.append("\n".join(cur).rstrip())
+                cur = [ln]
+            else:
+                cur.append(ln)
+        if cur:
+            blocks.append("\n".join(cur).rstrip())
+        return "bullets", [b for b in blocks if b.strip()]
+    paras = [p.strip("\n") for p in re.split(r"\n\s*\n", body) if p.strip()]
+    return "paragraphs", paras
+
+
+def _block_date(block):
+    token = _find_date_token(block[:60])
+    return _parse_date_str(token) if token else None
+
+
+def _drop_order(blocks):
+    """Indices in the order a section's blocks should be dropped: dated ones
+    oldest-first (so the newest survive — this is Decisions' "keep the newest
+    bullets" rule), undated ones only after every dated one is gone. A section with
+    no dates at all (plain bullets like Risks) falls back to dropping from the end,
+    the general rule for prose."""
+    dates = [_block_date(b) for b in blocks]
+    if any(d is not None for d in dates):
+        dated = sorted((i for i in range(len(blocks)) if dates[i] is not None),
+                       key=lambda i: dates[i])
+        undated = list(reversed([i for i in range(len(blocks)) if dates[i] is None]))
+        return dated + undated
+    return list(reversed(range(len(blocks))))
+
+
+def _section_marker(name, kind, cut, total, budget):
+    unit = "bullets" if kind == "bullets" else "paragraphs"
+    return (f'[{name}: {cut} of {total} {unit} cut — --section "{name}" '
+            f"--budget {budget * 3} or --full]")
+
+
+def _section_state(requested_name, actual_name, body):
+    kind, blocks = _split_blocks(body)
+    prio = _section_priority(requested_name)
+    # Snapshot-tier keeps a floor of one block (its lead paragraph/bullet): the drop
+    # order simply never includes index 0. Every other tier can be cut to nothing.
+    order = list(reversed(range(1, len(blocks)))) if prio == 0 else _drop_order(blocks)
+    return {"name": actual_name, "kind": kind, "blocks": blocks, "priority": prio,
+            "drop_order": order, "ptr": 0, "removed": set(), "cut_count": 0}
+
+
+def _next_cuttable(states, tier_order):
+    """The next section (by cut priority) that still has a block it is willing to
+    give up, or None once every section has hit its floor."""
+    for i in tier_order:
+        if states[i]["ptr"] < len(states[i]["drop_order"]):
+            return i
+    return None
 
 
 def brief(path, slug, *, since=None, grep=None, sections=None, budget=DEFAULT_BUDGET_TOKENS,
@@ -264,13 +358,14 @@ def brief(path, slug, *, since=None, grep=None, sections=None, budget=DEFAULT_BU
     else:
         since_date = date.today() - timedelta(days=DEFAULT_WINDOW_DAYS)
 
+    requested = sections or list(DEFAULT_SECTIONS)
     picked = []
-    for name in (sections or list(DEFAULT_SECTIONS)):
+    for name in requested:
         actual = find_section(sects, name)
         # The Log section has its own dedicated, budgeted rendering below — never double
         # it up as a plain section even if someone passes --section Log.
         if actual and not actual.strip().lower().startswith("log"):
-            picked.append((actual, sects[actual].strip()))
+            picked.append((name, actual, sects[actual].strip()))
 
     windowed = sorted((e for e in entries if e["date"] and e["date"] >= since_date),
                       key=lambda e: e["date"], reverse=True)
@@ -296,22 +391,37 @@ def brief(path, slug, *, since=None, grep=None, sections=None, budget=DEFAULT_BU
         return json.dumps({
             "opp": slug,
             "frontmatter": {k: frontmatter[k] for k in FRONTMATTER_KEYS if frontmatter.get(k)},
-            "sections": dict(picked),
+            "sections": {actual: body for _req, actual, body in picked},
             "since": since_date.isoformat(),
             "grep": grep,
             "log_entries": [{"date": e["date"].isoformat() if e["date"] else None,
                              "headline": e["headline"], "body": e["body"]} for e in matches],
         }, indent=2)
 
-    header = [f"{k}: {frontmatter[k]}" for k in FRONTMATTER_KEYS if frontmatter.get(k)]
-    section_names = [n for n, _ in picked]
-    section_bodies0 = [b for _, b in picked]
+    header_block = "\n".join(f"{k}: {frontmatter[k]}" for k in FRONTMATTER_KEYS if frontmatter.get(k))
+    states = [_section_state(req, actual, body) for req, actual, body in picked]
+    # Cut order: highest priority number first (3=extra, 2=Risks, 1=Decisions,
+    # 0=Snapshot last) — the exact reverse of how protected each tier is.
+    tier_order = sorted(range(len(states)), key=lambda i: -states[i]["priority"])
+    # The headline floor only protects plain headline rendering — a --grep hit list
+    # is not "the most valuable thing in a brief" in the same sense, and a full-body
+    # match can be large enough that a hard floor on count would blow the budget.
+    headline_floor = 0 if grep_re else min(10, len(windowed))
 
-    def compose(bodies, items, cut_line):
-        parts = list(header)
-        for name, body in zip(section_names, bodies):
-            if body:
-                parts.append(f"## {name}\n{body}")
+    def compose(states, items, cut_line):
+        parts = [header_block] if header_block else []
+        for st in states:
+            kept = [st["blocks"][j] for j in range(len(st["blocks"])) if j not in st["removed"]]
+            if not kept and not st["cut_count"]:
+                continue
+            joiner = "\n" if st["kind"] == "bullets" else "\n\n"
+            body_text = joiner.join(kept)
+            if st["cut_count"]:
+                marker = _section_marker(st["name"], st["kind"], st["cut_count"],
+                                         len(st["blocks"]), budget)
+                body_text = f"{body_text}\n{marker}" if body_text else marker
+            if body_text:
+                parts.append(f"## {st['name']}\n{body_text}")
         if has_log:
             joiner = "\n\n" if grep_re else "\n"
             block = log_label + (("\n" + joiner.join(items)) if items else "")
@@ -322,24 +432,38 @@ def brief(path, slug, *, since=None, grep=None, sections=None, budget=DEFAULT_BU
         return "\n\n".join(p for p in parts if p)
 
     budget_bytes = max(budget, 0) * 4
-    bodies = list(section_bodies0)
     items = list(log_items)
     cut_logs = cut_bytes = 0
-    text = compose(bodies, items, "")
+    text = compose(states, items, "")
     guard = 0
-    while len(text.encode("utf-8")) > budget_bytes and (items or any(bodies)) and guard < 1000:
+    while len(text.encode("utf-8")) > budget_bytes and guard < 2000:
         guard += 1
-        if items:
+        sec_i = _next_cuttable(states, tier_order)
+        if sec_i is not None:
+            st = states[sec_i]
+            idx = st["drop_order"][st["ptr"]]
+            st["removed"].add(idx)
+            st["ptr"] += 1
+            st["cut_count"] += 1
+            cut_bytes += len(st["blocks"][idx].encode("utf-8"))
+        elif len(items) > headline_floor:
             items.pop()               # list is newest-first: pop() drops the oldest
             cut_logs += 1
         else:
-            for i in range(len(bodies) - 1, -1, -1):
-                if bodies[i]:
-                    chunk = max(1, len(bodies[i]) // 4)
-                    cut_bytes += len(bodies[i][-chunk:].encode("utf-8"))
-                    bodies[i] = bodies[i][:-chunk]
-                    break
-        text = compose(bodies, items, _cut_note(cut_logs, cut_bytes, budget))
+            # Every floor is spent and it still does not fit — break them too, in the
+            # same protected-last order, so the hard budget cap always wins.
+            snap = next((s for s in states if s["priority"] == 0 and s["blocks"]
+                        and 0 not in s["removed"]), None)
+            if snap:
+                snap["removed"].add(0)
+                snap["cut_count"] += 1
+                cut_bytes += len(snap["blocks"][0].encode("utf-8"))
+            elif items:
+                items.pop()
+                cut_logs += 1
+            else:
+                break                  # nothing left anywhere to cut
+        text = compose(states, items, _cut_note(cut_logs, cut_bytes, budget))
     return text
 
 

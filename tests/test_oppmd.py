@@ -8,6 +8,7 @@ and `brief`'s token budget is an actual cap, not a suggestion.
 import contextlib
 import fcntl
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -204,6 +205,86 @@ class Brief(unittest.TestCase):
 
     def test_default_budget_is_1500_tokens_worth_of_bytes(self):
         self.assertEqual(oppmd.DEFAULT_BUDGET_TOKENS, 1500)
+
+    def test_frontmatter_lines_joined_with_a_single_newline(self):
+        """Each frontmatter key used to be its own '\\n\\n'-joined part — five blank-line
+        gaps burning budget for no reason. They must read as one tight block."""
+        out = oppmd.brief(fixture("iso.md"), "iso", since="2000-01-01")
+        self.assertIn(
+            "opp_name: Iso Corp - Land - Q3 FY2026\nstage: Alignment\namount: 250000\n"
+            "close_date: 2026-12-15\nsf_opp_id: 006Rl00001IsoCorpAA", out)
+
+
+class PriorityTrimming(unittest.TestCase):
+    """9/14/26 real-data review: `brief optum` spent the whole budget on Snapshot and
+    Decisions, then reported "cut 22 older log line(s)" — zero recent Log headlines
+    survived, and Decisions was cut mid-word ("workshop o"). Recent Log headlines are
+    the most valuable thing in a brief, so cutting must spend in the OPPOSITE priority
+    order: extra sections, then Risks, then Decisions, then Snapshot down to its lead
+    paragraph, and only then Log headlines — at whole paragraph/bullet boundaries, never
+    mid-word — with a floor of the 10 newest in-window headlines.
+
+    fixtures/oppmd/priority.md is sized so that everything does not fit under the
+    default 1500-token budget: a 7-paragraph Snapshot, a 14-bullet dated Decisions list,
+    a 3-bullet undated Risks list, and 15 in-window Log entries.
+    """
+
+    def test_default_budget_protects_headlines_and_the_newest_decision(self):
+        out = oppmd.brief(fixture("priority.md"), "priority", since="2026-08-16",
+                          budget=oppmd.DEFAULT_BUDGET_TOKENS)
+        self.assertLessEqual(len(out.encode("utf-8")), oppmd.DEFAULT_BUDGET_TOKENS * 4)
+
+        headlines = re.findall(r"^\d{4}-\d{2}-\d{2} Headline for entry \d+\.$", out, re.M)
+        self.assertGreaterEqual(len(headlines), 10, "all 15 are in-window; the floor is 10")
+
+        # Risks (undated, lowest tier below Snapshot/Decisions) and part of Decisions
+        # had to give way to fit — proving the cutting order actually ran extras/Risks
+        # before touching Decisions, and Decisions before Snapshot or any headline.
+        self.assertIn('[Risks / blockers:', out)
+        self.assertIn('[Decisions & commitments:', out)
+        self.assertNotIn('[Snapshot:', out)             # Snapshot never had to give way here
+
+        self.assertIn("SNAPFIRST-MARKER", out)           # Snapshot's lead paragraph survives
+        self.assertIn("NEWEST-DECISION-MARKER", out)      # the newest decision bullet survives
+
+        # No line ends mid-word: every surviving Decisions bullet is checked against its
+        # exact, complete expected text (this is the literal shape of the reported bug —
+        # a bullet cut off after "workshop o").
+        dec_block = out.split("## Decisions & commitments\n", 1)[1].split("\n\n## Risks", 1)[0]
+        bullet_re = re.compile(
+            r"^- \d{4}-\d{2}-\d{2}: (?:NEWEST-DECISION-MARKER )?Decision bullet \d+\. "
+            r"(?:Detail padding on the decision rationale at some length\. ){3}"
+            r"Detail padding on the decision rationale at some length\.$")
+        bullets = [ln for ln in dec_block.split("\n") if ln.startswith("- ")]
+        self.assertGreater(len(bullets), 0)
+        for ln in bullets:
+            self.assertRegex(ln, bullet_re, f"truncated mid-word: {ln!r}")
+
+        # oldest bullets are the ones dropped, not the newest
+        self.assertNotIn("Decision bullet 0.", out)
+        self.assertIn("Decision bullet 13.", out)
+
+    def test_section_priority_order(self):
+        self.assertEqual(oppmd._section_priority("Snapshot"), 0)
+        self.assertEqual(oppmd._section_priority("Decisions"), 1)
+        self.assertEqual(oppmd._section_priority("Risks"), 2)
+        self.assertEqual(oppmd._section_priority("Technical environment"), 3)
+
+    def test_drop_order_is_oldest_dated_block_first(self):
+        blocks = ["- 2026-08-01: old", "- 2026-09-01: new", "- 2026-07-01: oldest"]
+        self.assertEqual(oppmd._drop_order(blocks), [2, 0, 1])
+
+    def test_drop_order_falls_back_to_from_the_end_with_no_dates(self):
+        blocks = ["- a", "- b", "- c"]
+        self.assertEqual(oppmd._drop_order(blocks), [2, 1, 0])
+
+    def test_split_blocks_detects_bullets_vs_paragraphs(self):
+        kind, blocks = oppmd._split_blocks("- one\n- two\n- three")
+        self.assertEqual(kind, "bullets")
+        self.assertEqual(len(blocks), 3)
+        kind, blocks = oppmd._split_blocks("Paragraph one.\n\nParagraph two.")
+        self.assertEqual(kind, "paragraphs")
+        self.assertEqual(len(blocks), 2)
 
 
 # ── log insert ───────────────────────────────────────────────────────────────
