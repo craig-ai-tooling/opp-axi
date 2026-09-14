@@ -313,6 +313,10 @@ def _resolve_field(ref):
     for label, api, why in cli.FIELDS["dead"]:
         if ref_l in (label.lower(), api.lower()):
             cli.die(f"refusing '{ref}' ({api}): {why}", cli.E_REFUSED)
+    for label, api, _section in cli.FIELDS["rep"]:
+        if ref_l in (label.lower(), api.lower()):
+            cli.die(f"refusing '{ref}' ({api}): rep-owned — read it with "
+                     f"`opp-axi rep`, never write it", cli.E_REFUSED)
     cli.die(f"unknown field '{ref}' — see opp-axi fields write", cli.E_USAGE)
 
 

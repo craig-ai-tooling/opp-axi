@@ -30,7 +30,7 @@ import subprocess
 import sys
 from datetime import datetime, timedelta
 
-from opp_axi import __version__, guard, oppmd
+from opp_axi import __version__, guard, oppmd, rep
 
 # Packaged as a zipapp, __file__ is inside the archive, so the old
 # dirname(dirname(realpath(__file__))) trick cannot find the opp repo any more.
@@ -470,8 +470,9 @@ def cmd_opp(a):
         f"\nactivity.latest: {shown_act or '(empty)'}{size_hint(act, shown_act)}",
         f"notes: {shown_notes or '(empty)'}{size_hint(notes, shown_notes)}",
         "" if mine else f"\nWARNING: SE is '{r.get('SA_Assignment_Oppty__c')}', not {ME} — read-only, do not write.",
-        nxt(f"opp-axi opp {slug} --full", f"opp-axi activity {slug} --add \"...\"") if mine
-        else nxt(f"opp-axi opp {slug} --full"))
+        nxt(f"opp-axi opp {slug} --full", f"opp-axi activity {slug} --add \"...\"",
+            f"opp-axi rep {slug}") if mine
+        else nxt(f"opp-axi opp {slug} --full", f"opp-axi rep {slug}"))
 
 
 def cmd_sweep(a):
@@ -1298,7 +1299,7 @@ def cmd_evidence(a):
          f"(Slack is not searched; check it before concluding.)" if not _GAPS else
          "\nNo signal found, but a source above was UNAVAILABLE — this is NOT evidence "
          "of a quiet week. Close the gap before writing 'no new activity'."),
-        nxt(f'opp-axi activity {ref} --add "..."', f"opp-axi opp {ref}"))
+        nxt(f'opp-axi activity {ref} --add "..."', f"opp-axi opp {ref}", f"opp-axi rep {ref}"))
 
 
 PATTERNS_PATH = os.environ.get("OPP_PATTERNS") or os.path.expanduser(
@@ -1566,6 +1567,67 @@ FIELDS = {
         ("Tech Win", "Tech_Approval__c", "dead twin, 0 populated"),
         ("Validation Plan", "Technical_Validation_Plan__c", "on NEITHER UI surface — invisible"),
     ],
+    # Rep/AE-owned Opportunity data. opp-axi READS these (see `opp-axi rep`) and never
+    # writes them — some (Next_Steps__c, StageName, Amount, CloseDate,
+    # Current/Desired_Technical_State__c, Use_Case_Primary__c) are already refused above
+    # via FIELDS["never"]; the rest are refused here with a pointer to `opp-axi rep`
+    # instead of a bare "SE never writes this field".
+    "rep": [
+        # deal
+        ("Stage", "StageName", "deal"),
+        ("Amount", "Amount", "deal"),
+        ("Close Date", "CloseDate", "deal"),
+        ("Forecast Category", "ForecastCategoryName", "deal"),
+        ("Forecast Status", "Forecast_Status__c", "deal"),
+        ("Probability", "Probability__c", "deal"),
+        ("Confidence", "Confidence__c", "deal"),
+        ("Deal Qualification Health", "Deal_Qualification_Health__c", "deal"),
+        ("Next Steps Last Updated", "Next_Steps_Last_Updated__c", "deal"),
+        ("Days Since Next Steps Update", "Days_Since_Next_Steps_Update__c", "deal"),
+        ("Account Executive", "Account_Executive__c", "deal"),
+        ("Use Case Primary", "Use_Case_Primary__c", "deal"),
+        ("Lead Source", "LeadSource", "deal"),
+        # nextSteps
+        ("Next Steps", "Next_Steps__c", "nextSteps"),
+        # meddpicc
+        ("Metrics", "Metrics__c", "meddpicc"),
+        ("Economic Buyer", "Economic_Buyer__c", "meddpicc"),
+        ("Economic Buyer Status", "Economic_Buyer_Status__c", "meddpicc"),
+        ("Decision Criteria", "Decision_Criteria__c", "meddpicc"),
+        ("Decision Process", "Decision_Process__c", "meddpicc"),
+        ("Paper Process", "Paper_Process__c", "meddpicc"),
+        ("Identified Pain", "Identified_Pain__c", "meddpicc"),
+        ("Champion", "Champion__c", "meddpicc"),
+        ("Champion Status", "Champion_Status__c", "meddpicc"),
+        ("Last Time Testing Champion", "Last_Time_Testing_Champion__c", "meddpicc"),
+        ("Competition", "Competition__c", "meddpicc"),
+        ("Coach", "Coach__c", "meddpicc"),
+        ("Coach Status", "Coach_Status__c", "meddpicc"),
+        ("Compelling Event", "Compelling_Event__c", "meddpicc"),
+        # qualification
+        ("Why Anything", "Why_Anything__c", "qualification"),
+        ("Why Now", "Why_Now__c", "qualification"),
+        ("Why Us", "Why_Us__c", "qualification"),
+        ("Budget Description", "Budget_Description__c", "qualification"),
+        ("Authority Description", "Authority_Description__c", "qualification"),
+        ("Need Description", "Need_Description__c", "qualification"),
+        ("Timeline Description", "Timeline_Description__c", "qualification"),
+        # narrative
+        ("Description", "Description", "narrative"),
+        ("Use Case Notes", "Use_Case_Notes__c", "narrative"),
+        ("Executive Summary Narrative", "Executive_Summary_Narrative__c", "narrative"),
+        ("Account Plan Narrative", "Account_Plan_Narrative__c", "narrative"),
+        ("Mutual Action Plan Narrative", "Mutual_Action_Plan_Narrative__c", "narrative"),
+        ("Value Hypothesis Narrative", "Value_Hypothesis_Narrative__c", "narrative"),
+        ("Channel Notes", "Channel_Notes__c", "narrative"),
+        ("Current Technical State", "Current_Technical_State__c", "narrative"),
+        ("Desired Technical State", "Desired_Technical_State__c", "narrative"),
+        # links
+        ("Executive Summary Link", "Executive_Summary__c", "links"),
+        ("Account Plan Link", "Account_Plan__c", "links"),
+        ("Mutual Action Plan Link", "EW_Mutual_Action_Plan__c", "links"),
+        ("Value Hypothesis Link", "Value_Hypothesis__c", "links"),
+    ],
 }
 
 
@@ -1582,10 +1644,14 @@ def cmd_fields(a):
     if sec in (None, "dead"):
         out.append(toon("deadTwins", ["label", "api", "why"],
                         [dict(zip(("label", "api", "why"), f)) for f in FIELDS["dead"]]))
+    if sec in (None, "rep"):
+        out.append(toon("repReadOnly", ["label", "api", "section"],
+                        [dict(zip(("label", "api", "section"), f)) for f in FIELDS["rep"]]))
+        out.append("\nrule: read-only: opp-axi reads rep fields, never writes them")
     out.append("\nrules: REST PATCH only (sf data update -v writes null for emoji, mangles newlines) "
                "| prepend SE Activity, never overwrite | write only where "
                f"SA_Assignment_Oppty__c='{ME}' | always verify after write")
-    emit(*out, nxt("opp-axi fields write|never|dead"))
+    emit(*out, nxt("opp-axi fields write|never|dead|rep"))
 
 
 def cmd_brief(a):
@@ -1856,8 +1922,19 @@ def main():
     s.set_defaults(fn=cmd_doctor)
 
     s = sub.add_parser("fields", help="SE field reference (on demand)")
-    s.add_argument("section", nargs="?", choices=["write", "never", "dead"])
+    s.add_argument("section", nargs="?", choices=["write", "never", "dead", "rep"])
     s.set_defaults(fn=cmd_fields)
+
+    s = sub.add_parser("rep", help="rep/AE-entered opp data, READ-ONLY (separate from SE fields)")
+    s.add_argument("ref", nargs="?", help="dir slug or SF opp id; omit for the open-pipeline rollup")
+    s.add_argument("--since", help="YYYY-MM-DD or M/D/YY")
+    s.add_argument("--full", action="store_true", help="untruncated text, all rows")
+    s.add_argument("--section", action="append",
+                  choices=["deal", "nextSteps", "meddpicc", "qualification", "narrative",
+                           "activity", "notes", "files", "changes", "contacts"],
+                  help="repeatable; default is every section")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(fn=rep.cmd_rep)
 
     s = sub.add_parser("brief", help="a budgeted slice of an opp's OPP.md, not the whole file")
     s.add_argument("ref")

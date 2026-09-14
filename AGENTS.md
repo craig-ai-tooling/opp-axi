@@ -17,6 +17,9 @@ One Python package, stdlib only. `opp_axi/cli.py` holds every verb.
 - `opp_axi/cli.py` — verbs, TOON output, connector probes, `doctor`.
 - `opp_axi/guard.py` — the write guard: `guarded_patch()` is the only path to
   `sf_patch()`, plus `activity`'s lint/dedupe and the `field`/`undo`/`writes` verbs.
+- `opp_axi/rep.py` — rep/AE-owned Opportunity data, READ-ONLY: the `rep` verb (one
+  opp, or the no-ref rollup), the Next_Steps__c parser, and Clari call-summary
+  extraction. Never touches `guard.py`.
 - `opp_axi/templates/` — the OPP.md seed, shipped with the tool so `scaffold`
   does not need a file in the data repo.
 - `tests/` — the connector contract. Not "does Salesforce work".
@@ -65,6 +68,10 @@ exactly one caller; `grep -n "sf_patch(" opp_axi/*.py` outside `guard.py` means 
 invariant broke. Never use `sf data update record -v` — it writes null for emoji
 picklists and mangles newlines while reporting success. `field` is named `field`,
 not `set`, because a global shell guard on this box blocks the bare word `set`.
+
+**Rep data is read-only.** `rep.py` never writes, and `field` refuses a rep-owned
+field. SE and rep views are separate verbs on purpose — an SE status built from `opp`
+alone misses what the rep logged.
 
 ## Conventions
 
