@@ -796,7 +796,8 @@ def cmd_scaffold(a):
         with open(os.path.join(d, ".salesforce.json"), "w") as f:
             json.dump(sf_json, f, indent=2); f.write("\n")
         open(os.path.join(d, "CLAUDE.md"), "w").write(
-            "Read [OPP.md](OPP.md) before any work on this account.")
+            f"Run `opp-axi brief {slug}` before any work on this account. "
+            "Read [OPP.md](OPP.md) only when the brief isn't enough.")
         open(os.path.join(d, "OPP.md"), "w").write(note)
 
     emit(f"scaffold{' (dry-run)' if a.dry_run else ''} se={ME}",

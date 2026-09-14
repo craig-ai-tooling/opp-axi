@@ -8,11 +8,15 @@ link the assistant reads on demand instead, and that repo's automation/checks.py
 `no-bare-import` check now FAILs CI on any bare `@path` line in a CLAUDE.md. Until
 this generator matches, every new account re-introduces the bug PR #36 fixes.
 
-The link text itself must be byte-identical to what customer-opportunities writes
-(verified against e.g. customer-opportunities/bio-rad/CLAUDE.md) -- including that
-there is no trailing newline. That is not cosmetic: a scaffolded CLAUDE.md that
-merely avoids the bare-import regex but differs byte-for-byte from the other 68
-files in the fleet is a second, quieter divergence bug.
+The link text itself must be byte-identical to what customer-opportunities writes,
+slug aside (verified against e.g. customer-opportunities/bio-rad/CLAUDE.md) --
+including that there is no trailing newline. That is not cosmetic: a scaffolded
+CLAUDE.md that merely avoids the bare-import regex but differs byte-for-byte from
+the other 68 files in the fleet is a second, quieter divergence bug.
+
+customer-opportunities W6 (9/14/26) moved the pointer from a bare `OPP.md` read to
+`opp-axi brief <slug>` first, falling back to `OPP.md` only when the brief isn't
+enough -- this test tracks that text, not the pre-W6 one.
 """
 import os
 import re
@@ -27,8 +31,10 @@ from opp_axi import cli
 IMPORT_RE = re.compile(r'^[ \t]*@(\S+)', re.M)
 
 # Byte-identical to customer-opportunities/bio-rad/CLAUDE.md (and 67 other
-# per-account CLAUDE.md files) -- no trailing newline.
-EXPECTED_CLAUDE_MD = "Read [OPP.md](OPP.md) before any work on this account."
+# per-account CLAUDE.md files) except the slug -- no trailing newline. FAKE_OPP
+# below scaffolds into a dir named "acme", so the slug here is "acme".
+EXPECTED_CLAUDE_MD = ("Run `opp-axi brief acme` before any work on this account. "
+                       "Read [OPP.md](OPP.md) only when the brief isn't enough.")
 
 
 class ScaffoldClaudeMd(unittest.TestCase):

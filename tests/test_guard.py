@@ -74,10 +74,10 @@ class StateDirCase(unittest.TestCase):
 
 
 class TestVersionBump(unittest.TestCase):
-    def test_version_is_0_1_6(self):
-        # 0.1.5 was this branch's own bump; 0.1.6 is the merge-in of cos/opp-axi-brief-log
-        # on top of it (two PRs landed on main, each bumping once).
-        self.assertEqual(__version__, "0.1.6")
+    def test_version_is_0_1_7(self):
+        # 0.1.6 was on main; 0.1.7 is this branch's own bump (scaffold's CLAUDE.md
+        # pointer moves to `opp-axi brief <slug>` -- W6).
+        self.assertEqual(__version__, "0.1.7")
 
 
 class TestStateDir(StateDirCase):
