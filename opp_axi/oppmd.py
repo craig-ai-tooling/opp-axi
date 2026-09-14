@@ -228,16 +228,23 @@ def _read(path):
 
 # ── brief ──────────────────────────────────────────────────────────────────
 # Budget priority, most protected first: frontmatter (never cut) -> Log headlines
-# (floor: the 10 newest in-window, or all if fewer — the most valuable thing in a
-# brief) -> Snapshot (floor: its first paragraph/bullet) -> Decisions -> Risks ->
-# any extra --section. Trimming spends in the opposite order: extra sections first,
-# then Risks, then Decisions, then Snapshot down to its floor, and only THEN log
-# headlines, oldest first, down to their floor. Sections are cut at whole
-# paragraph/bullet boundaries — never mid-word — and a dated bullet list (Decisions)
-# drops its oldest bullets first, keeping the newest. Floors are a preference, not a
-# license to blow the budget: if a budget is small enough that every floor is spent
-# and it still does not fit, the last resort is Snapshot's protected paragraph, then
-# the headline floor itself — the hard byte cap always wins in the end.
+# (floor: the 10 newest in-window, or all if fewer) -> per-section floors (Snapshot's
+# lead block; Decisions' 3 newest dated bullets, or first 3 if undated; Risks' first 3
+# blocks; any extra --section's first block).
+#
+# Above those floors, sections shrink together via round-robin: each step drops one
+# droppable block from whichever section is CURRENTLY LARGEST in bytes (a size tie
+# goes to the lower-priority section), using that section's own drop order (oldest
+# dated block first, else from the end). 9/14/26 real-data review: strict tier
+# exhaustion wiped Risks and Decisions to nothing while a much bigger Snapshot history
+# sat untouched — round-robin-by-size is what keeps one bloated section from starving
+# the others, shrinking each roughly in proportion to what it is actually costing.
+#
+# Only once every section is AT its floor does headline-floor trimming start (oldest
+# first, down to 10). Only once THAT floor is reached does the last resort break the
+# floors themselves, least-protected first: Risks, then Decisions, then Snapshot's
+# lead block, then finally the headline floor all the way to nothing — so the hard
+# budget cap always wins in the end, in the same protected-last order used everywhere.
 def _cut_note(cut_logs, cut_bytes, budget):
     bits = []
     if cut_logs:
@@ -272,12 +279,21 @@ def _section_priority(requested_name):
 def _split_blocks(body):
     """A section body -> ('bullets'|'paragraphs', [block, ...]) in file order. A block
     is one top-level '- ' bullet (plus any indented continuation) if bullets make up
-    at least half the section's non-blank lines, else one blank-line-separated
-    paragraph. Trimming only ever drops a whole block, so a cut never lands mid-word."""
+    at least half the section's UNINDENTED lines, else one blank-line-separated
+    paragraph. Trimming only ever drops a whole block, so a cut never lands mid-word.
+
+    The ratio is over unindented lines only, not every non-blank line: a real
+    Decisions/Risks bullet often wraps onto 2-3 indented continuation lines (this
+    codebase's convention — see Log entries), and counting those as "not a bullet"
+    diluted the ratio below 50% and misclassified the whole section as one giant
+    prose paragraph — which then floored (and thereby fully protected) the entire
+    section as a single undroppable block instead of the individually-trimmable
+    bullets it actually is. Continuation lines are indented; wrapped PROSE lines in a
+    real Snapshot are not, so this does not affect paragraph-shaped sections."""
     lines = body.split("\n")
-    nonblank = [ln for ln in lines if ln.strip()]
+    col0 = [ln for ln in lines if ln.strip() and ln == ln.lstrip()]
     dash_top = sum(1 for ln in lines if ln.startswith("- "))
-    if dash_top and dash_top >= max(1, len(nonblank) // 2):
+    if dash_top and dash_top >= max(1, len(col0) // 2):
         blocks, cur = [], []
         for ln in lines:
             if ln.startswith("- "):
@@ -298,12 +314,11 @@ def _block_date(block):
     return _parse_date_str(token) if token else None
 
 
-def _drop_order(blocks):
-    """Indices in the order a section's blocks should be dropped: dated ones
-    oldest-first (so the newest survive — this is Decisions' "keep the newest
-    bullets" rule), undated ones only after every dated one is gone. A section with
-    no dates at all (plain bullets like Risks) falls back to dropping from the end,
-    the general rule for prose."""
+def _dated_drop_order(blocks):
+    """Indices oldest-dated-first (the newest survive longest — this is Decisions'
+    "keep the 3 newest bullets" rule: its floor is just the tail of this list).
+    Undated blocks only after every dated one is gone; a section with no dates at all
+    falls back to dropping from the end, the general rule for prose."""
     dates = [_block_date(b) for b in blocks]
     if any(d is not None for d in dates):
         dated = sorted((i for i in range(len(blocks)) if dates[i] is not None),
@@ -313,29 +328,63 @@ def _drop_order(blocks):
     return list(reversed(range(len(blocks))))
 
 
+def _positional_drop_order(blocks):
+    """Always from the end, ignoring any date text a block happens to contain — used
+    where a floor is defined purely positionally ("first N blocks"), like Risks and
+    any extra --section, rather than by recency."""
+    return list(reversed(range(len(blocks))))
+
+
 def _section_marker(name, kind, cut, total, budget):
     unit = "bullets" if kind == "bullets" else "paragraphs"
     return (f'[{name}: {cut} of {total} {unit} cut — --section "{name}" '
             f"--budget {budget * 3} or --full]")
 
 
+# Per-section floor (block count protected from round-robin trimming), by priority
+# tier. Snapshot's floor of 1 is baked into its drop_order instead (see
+# _section_state), because breaking it is its own distinct, later last-resort step.
+_FLOOR_BY_PRIORITY = {1: 3, 2: 3, 3: 1}
+
+
 def _section_state(requested_name, actual_name, body):
     kind, blocks = _split_blocks(body)
     prio = _section_priority(requested_name)
-    # Snapshot-tier keeps a floor of one block (its lead paragraph/bullet): the drop
-    # order simply never includes index 0. Every other tier can be cut to nothing.
-    order = list(reversed(range(1, len(blocks)))) if prio == 0 else _drop_order(blocks)
+    if prio == 0:
+        # Snapshot: floor of 1 (its lead block) is baked in by excluding index 0
+        # entirely. Round-robin can freely consume the rest; breaking the lead block
+        # is a separate, later last-resort step (see brief()).
+        order = list(reversed(range(1, len(blocks))))
+        floor_len = len(order)
+    elif prio == 1:
+        # Decisions: keep the 3 newest DATED bullets (or first 3 if undated) — the
+        # tail of _dated_drop_order() is exactly "most recent, least droppable".
+        order = _dated_drop_order(blocks)
+        floor_len = max(0, len(order) - min(_FLOOR_BY_PRIORITY[1], len(blocks)))
+    else:
+        # Risks and any extra --section: floor is purely positional ("first N
+        # blocks"), never date-aware, per spec.
+        order = _positional_drop_order(blocks)
+        floor_len = max(0, len(order) - min(_FLOOR_BY_PRIORITY[prio], len(blocks)))
     return {"name": actual_name, "kind": kind, "blocks": blocks, "priority": prio,
-            "drop_order": order, "ptr": 0, "removed": set(), "cut_count": 0}
+            "drop_order": order, "floor_len": floor_len, "ptr": 0, "removed": set(),
+            "cut_count": 0}
 
 
-def _next_cuttable(states, tier_order):
-    """The next section (by cut priority) that still has a block it is willing to
-    give up, or None once every section has hit its floor."""
-    for i in tier_order:
-        if states[i]["ptr"] < len(states[i]["drop_order"]):
-            return i
-    return None
+def _current_bytes(st):
+    return sum(len(st["blocks"][j].encode("utf-8"))
+               for j in range(len(st["blocks"])) if j not in st["removed"])
+
+
+def _largest_above_floor(states):
+    """The section to cut from next, above the floors: whichever is currently biggest
+    in bytes among those still above their own floor, or None once every section has
+    hit its floor. A size tie goes to the lower-priority (less protected) section —
+    max()'s key tuple breaks ties on priority number."""
+    candidates = [i for i, st in enumerate(states) if st["ptr"] < st["floor_len"]]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda i: (_current_bytes(states[i]), states[i]["priority"]))
 
 
 def brief(path, slug, *, since=None, grep=None, sections=None, budget=DEFAULT_BUDGET_TOKENS,
@@ -400,9 +449,6 @@ def brief(path, slug, *, since=None, grep=None, sections=None, budget=DEFAULT_BU
 
     header_block = "\n".join(f"{k}: {frontmatter[k]}" for k in FRONTMATTER_KEYS if frontmatter.get(k))
     states = [_section_state(req, actual, body) for req, actual, body in picked]
-    # Cut order: highest priority number first (3=extra, 2=Risks, 1=Decisions,
-    # 0=Snapshot last) — the exact reverse of how protected each tier is.
-    tier_order = sorted(range(len(states)), key=lambda i: -states[i]["priority"])
     # The headline floor only protects plain headline rendering — a --grep hit list
     # is not "the most valuable thing in a brief" in the same sense, and a full-body
     # match can be large enough that a hard floor on count would blow the budget.
@@ -436,9 +482,9 @@ def brief(path, slug, *, since=None, grep=None, sections=None, budget=DEFAULT_BU
     cut_logs = cut_bytes = 0
     text = compose(states, items, "")
     guard = 0
-    while len(text.encode("utf-8")) > budget_bytes and guard < 2000:
+    while len(text.encode("utf-8")) > budget_bytes and guard < 5000:
         guard += 1
-        sec_i = _next_cuttable(states, tier_order)
+        sec_i = _largest_above_floor(states)
         if sec_i is not None:
             st = states[sec_i]
             idx = st["drop_order"][st["ptr"]]
@@ -450,19 +496,35 @@ def brief(path, slug, *, since=None, grep=None, sections=None, budget=DEFAULT_BU
             items.pop()               # list is newest-first: pop() drops the oldest
             cut_logs += 1
         else:
-            # Every floor is spent and it still does not fit — break them too, in the
-            # same protected-last order, so the hard budget cap always wins.
-            snap = next((s for s in states if s["priority"] == 0 and s["blocks"]
-                        and 0 not in s["removed"]), None)
-            if snap:
-                snap["removed"].add(0)
-                snap["cut_count"] += 1
-                cut_bytes += len(snap["blocks"][0].encode("utf-8"))
-            elif items:
-                items.pop()
-                cut_logs += 1
+            # Every per-section floor and the headline floor are both spent and it
+            # still does not fit. Break the floors themselves, least-protected first:
+            # Risks, then Decisions, then Snapshot's lead block, then finally the
+            # headline floor all the way down — so the hard budget cap always wins.
+            broken = None
+            for prio_target in (2, 1):
+                cand = next((s for s in states if s["priority"] == prio_target
+                            and s["ptr"] < len(s["drop_order"])), None)
+                if cand:
+                    broken = cand
+                    break
+            if broken:
+                idx = broken["drop_order"][broken["ptr"]]
+                broken["removed"].add(idx)
+                broken["ptr"] += 1
+                broken["cut_count"] += 1
+                cut_bytes += len(broken["blocks"][idx].encode("utf-8"))
             else:
-                break                  # nothing left anywhere to cut
+                snap = next((s for s in states if s["priority"] == 0 and s["blocks"]
+                            and 0 not in s["removed"]), None)
+                if snap:
+                    snap["removed"].add(0)
+                    snap["cut_count"] += 1
+                    cut_bytes += len(snap["blocks"][0].encode("utf-8"))
+                elif items:
+                    items.pop()
+                    cut_logs += 1
+                else:
+                    break              # nothing left anywhere to cut
         text = compose(states, items, _cut_note(cut_logs, cut_bytes, budget))
     return text
 
