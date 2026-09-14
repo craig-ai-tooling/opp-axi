@@ -118,6 +118,8 @@ opp-axi wispr                # cached meetings, matched to opps
 opp-axi triage               # signal -> pattern -> proposed work
 opp-axi fields               # SE field reference
 opp-axi doctor               # what is configured, what is not
+opp-axi brief <ref>          # a budgeted slice of OPP.md, not the whole file
+opp-axi log <ref> "text"     # append a dated Log entry without reading the file
 ```
 
 ## Writing
