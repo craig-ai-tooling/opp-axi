@@ -981,6 +981,19 @@ def wispr_sync_ts(meta):
         return None, None
 
 
+def wispr_window_end(window_end, now):
+    """The end of the window being asked about, as a naive datetime no later than now.
+
+    Callers pass a `date` — `evidence` hands over its exclusive calendar bound (tomorrow) —
+    and comparing that to a datetime raises TypeError, which crashed `evidence` exactly when
+    the cache was partial. A date is that day's 00:00, same as a date-only last_sync."""
+    end = window_end or now
+    if not isinstance(end, datetime):
+        end = datetime.combine(end, datetime.min.time())
+    end = end.replace(tzinfo=None)
+    return min(end, now)
+
+
 def wispr_staleness(meta, window_end=None):
     """Loud warning beats a silent miss: a stale cache looks exactly like a quiet week.
 
@@ -997,9 +1010,7 @@ def wispr_staleness(meta, window_end=None):
         return "wispr cache: unreadable last_sync — run /wispr-sync"
 
     now = datetime.now()
-    end = window_end or now
-    if end > now:
-        end = now
+    end = wispr_window_end(window_end, now)
 
     age_days = (now.date() - ts.date()).days
     if age_days > WISPR_STALE_DAYS:
@@ -1037,9 +1048,7 @@ def wispr_freshness(meta, window_end=None):
         return "absent", "unreadable last_sync — run /wispr-sync"
 
     now = datetime.now()
-    end = window_end or now
-    if end > now:
-        end = now
+    end = wispr_window_end(window_end, now)
 
     age_days = (now.date() - ts.date()).days
     if age_days > WISPR_STALE_DAYS:

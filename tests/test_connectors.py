@@ -9,6 +9,8 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import date, datetime, timedelta, timezone
+from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
@@ -88,6 +90,26 @@ class TestWisprStates(unittest.TestCase):
         self.assertIn("do-this", line)
         self.assertEqual(len(cli._GAPS), 1)
         cli._GAPS.clear()
+
+    def test_date_window_on_a_partial_cache_warns_not_crashes(self):
+        """evidence passes its calendar bound — a date — as window_end. Comparing that to a
+        datetime raised TypeError, and only once the cache was partial, so a sync hid it."""
+        hi = datetime.now().date() + timedelta(days=1)
+        partial = {"last_sync": (datetime.now() - timedelta(hours=cli.WISPR_GAP_HOURS + 4)).isoformat()}
+        cli._GAPS.clear()
+        with mock.patch.object(cli, "WISPR_ENABLED", True):
+            self.assertIn("PARTIAL", cli.wispr_line([], partial, hi))
+            self.assertEqual(cli.wispr_freshness(partial, hi)[0], "partial")
+        self.assertEqual(len(cli._GAPS), 1, "a partial cache is a gap, not a clean exit")
+        cli._GAPS.clear()
+
+    def test_window_end_normalises_date_and_aware_datetime(self):
+        now = datetime(2026, 9, 14, 15, 0)
+        self.assertEqual(cli.wispr_window_end(None, now), now)
+        self.assertEqual(cli.wispr_window_end(date(2026, 9, 15), now), now)   # future clamps to now
+        self.assertEqual(cli.wispr_window_end(date(2026, 9, 13), now), datetime(2026, 9, 13))
+        aware = datetime(2026, 9, 14, 9, 0, tzinfo=timezone.utc)
+        self.assertEqual(cli.wispr_window_end(aware, now), datetime(2026, 9, 14, 9, 0))
 
 
 class TestDoctorExitCodes(unittest.TestCase):
