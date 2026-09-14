@@ -74,10 +74,11 @@ class StateDirCase(unittest.TestCase):
 
 
 class TestVersionBump(unittest.TestCase):
-    def test_version_is_0_1_7(self):
-        # 0.1.5 was this branch's own bump; 0.1.6 merged cos/opp-axi-brief-log on top
-        # of it; 0.1.7 is cos/opp-axi-brief-floors' own bump on top of that merge.
-        self.assertEqual(__version__, "0.1.7")
+    def test_version_is_0_1_8(self):
+        # 0.1.7 was tagged from cos/opp-axi-brief-floors while this branch was open, so
+        # the scaffold fix here needs its own bump to reach the installed binary via
+        # release: 0.1.8.
+        self.assertEqual(__version__, "0.1.8")
 
 
 class TestStateDir(StateDirCase):
