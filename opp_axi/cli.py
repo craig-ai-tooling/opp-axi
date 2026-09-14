@@ -31,7 +31,7 @@ import sys
 import tempfile
 from datetime import datetime, timedelta
 
-from opp_axi import __version__
+from opp_axi import __version__, oppmd
 
 # Packaged as a zipapp, __file__ is inside the archive, so the old
 # dirname(dirname(realpath(__file__))) trick cannot find the opp repo any more.
@@ -1588,6 +1588,38 @@ def cmd_fields(a):
     emit(*out, nxt("opp-axi fields write|never|dead"))
 
 
+def cmd_brief(a):
+    """Thin: resolve the ref to a note path, hand off to oppmd. All parsing, section
+    matching and budget trimming live in oppmd.py — this is registration + plumbing."""
+    idx = opp_index()
+    slug, _oid = resolve(a.ref, idx)
+    path = os.path.join(REPO, slug, "OPP.md")
+    if not os.path.exists(path):
+        die(f"no OPP.md at {path}", E_NOTFOUND)
+    try:
+        print(oppmd.brief(path, slug, since=a.since, grep=a.grep, sections=a.section,
+                          budget=a.budget, full=a.full, as_json=a.json))
+    except (oppmd.BadDate, oppmd.BadRegex) as e:
+        die(str(e), E_USAGE)
+
+
+def cmd_log(a):
+    """Thin: resolve, insert, print the inserted line. Never reads the note back out —
+    that is the whole point of this command over editing OPP.md by hand."""
+    idx = opp_index()
+    slug, _oid = resolve(a.ref, idx)
+    path = os.path.join(REPO, slug, "OPP.md")
+    if not os.path.exists(path):
+        die(f"no OPP.md at {path}", E_NOTFOUND)
+    try:
+        line = oppmd.insert_log_entry(path, slug, a.text, date_str=a.date)
+    except oppmd.NoLogSection:
+        die(f"no '## Log' heading in {path}", E_USAGE)
+    except oppmd.BadDate as e:
+        die(str(e), E_USAGE)
+    emit(f"inserted: {line}", nxt(f"opp-axi brief {slug}"))
+
+
 # ── cli ────────────────────────────────────────────────────────────────────
 # ── connectors ───────────────────────────────────────────────
 # The whole contract in one table. `need` is the only thing that decides what a
@@ -1800,6 +1832,24 @@ def main():
     s = sub.add_parser("fields", help="SE field reference (on demand)")
     s.add_argument("section", nargs="?", choices=["write", "never", "dead"])
     s.set_defaults(fn=cmd_fields)
+
+    s = sub.add_parser("brief", help="a budgeted slice of an opp's OPP.md, not the whole file")
+    s.add_argument("ref")
+    s.add_argument("--since", help="YYYY-MM-DD or M/D/YY — widen the Log window (default: 30d ago)")
+    s.add_argument("--grep", help="regex over full Log entries; prints matching bodies, not headlines")
+    s.add_argument("--section", action="append",
+                  help="repeatable; replaces the default Snapshot/Decisions/Risks list")
+    s.add_argument("--budget", type=int, default=oppmd.DEFAULT_BUDGET_TOKENS,
+                  help=f"token cap, measured as bytes/4 (default {oppmd.DEFAULT_BUDGET_TOKENS})")
+    s.add_argument("--full", action="store_true", help="print the raw file unchanged")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(fn=cmd_brief)
+
+    s = sub.add_parser("log", help="append a dated Log entry to an opp's OPP.md without reading it")
+    s.add_argument("ref")
+    s.add_argument("text", help="entry text; inserted above the newest existing entry")
+    s.add_argument("--date", help="YYYY-MM-DD or M/D/YY (default: today)")
+    s.set_defaults(fn=cmd_log)
 
     a = p.parse_args()
     if not a.cmd:
