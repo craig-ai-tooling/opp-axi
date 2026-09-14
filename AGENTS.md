@@ -15,6 +15,8 @@ One Python package, stdlib only. `opp_axi/cli.py` holds every verb.
 
 - `opp_axi/__init__.py` — `__version__`. The only place a release bumps.
 - `opp_axi/cli.py` — verbs, TOON output, connector probes, `doctor`.
+- `opp_axi/guard.py` — the write guard: `guarded_patch()` is the only path to
+  `sf_patch()`, plus `activity`'s lint/dedupe and the `field`/`undo`/`writes` verbs.
 - `opp_axi/templates/` — the OPP.md seed, shipped with the tool so `scaffold`
   does not need a file in the data repo.
 - `tests/` — the connector contract. Not "does Salesforce work".
@@ -55,9 +57,14 @@ clean. Losing that distinction turns an honest configuration into a permanent er
 **Never print a secret.** No API keys, no tokens, no `op` item contents in any
 output, including `doctor --json`.
 
-**This tool writes to live Salesforce.** `activity` does a verified REST PATCH.
-Never use `sf data update record -v` — it writes null for emoji picklists and
-mangles newlines while reporting success.
+**This tool writes to live Salesforce.** Every write — `activity`, `field`, `undo`
+— goes through `guard.guarded_patch()`: a per-opp lock, a compare-and-swap against
+what the caller last read, an audit line in `<state>/writes.jsonl` before AND after
+the PATCH, and a verified read-back. `sf_patch()` itself lives in `guard.py` and has
+exactly one caller; `grep -n "sf_patch(" opp_axi/*.py` outside `guard.py` means that
+invariant broke. Never use `sf data update record -v` — it writes null for emoji
+picklists and mangles newlines while reporting success. `field` is named `field`,
+not `set`, because a global shell guard on this box blocks the bare word `set`.
 
 ## Conventions
 

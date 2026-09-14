@@ -28,10 +28,10 @@ import re
 import shutil
 import subprocess
 import sys
-import tempfile
 from datetime import datetime, timedelta
 
 from opp_axi import __version__
+from opp_axi import guard
 
 # Packaged as a zipapp, __file__ is inside the archive, so the old
 # dirname(dirname(realpath(__file__))) trick cannot find the opp repo any more.
@@ -142,22 +142,6 @@ def sf_query(soql, timeout=180):
     if p.returncode != 0 or d.get("status") not in (0, None):
         die(f"sf query failed: {d.get('message', (p.stderr or '').strip())[:300]}")
     return d.get("result", {}).get("records", [])
-
-
-def sf_patch(opp_id, body):
-    """REST PATCH only. `sf data update -v` silently writes null for emoji picklists
-    and mangles newlines in long textareas — it reports success either way."""
-    fd, path = tempfile.mkstemp(suffix=".json")
-    with os.fdopen(fd, "w") as f:
-        json.dump(body, f, ensure_ascii=False)
-    try:
-        p = _run(["sf", "api", "request", "rest",
-                  f"/services/data/{API}/sobjects/Opportunity/{opp_id}",
-                  "--method", "PATCH", "--body", f"@{path}", "-o", ORG])
-        if p.returncode != 0:
-            die(f"PATCH failed: {(p.stderr or p.stdout).strip()[:300]}")
-    finally:
-        os.unlink(path)
 
 
 def gcli():
@@ -576,23 +560,40 @@ def cmd_activity(a):
     if not re.match(r"^\d{1,2}/\d{1,2}/\d{2,4}|^\d{4}-\d{2}-\d{2}", text):
         text = f"{datetime.now().strftime('%-m/%-d/%y')} {INITIALS}: {text}"
     existing = r.get("Sales_Engineer_Overview__c") or ""
-    new = text + ("\n" + existing if existing else "")
+    stamp = datetime.now().strftime("%-m/%-d/%y")
+
+    hits = guard.lint(text, allow=a.allow)
+    if hits:
+        die(f"lint blocked: {', '.join(hits)} — pass --allow <rule> to override "
+            f"(recorded in the audit log)", E_REFUSED)
+
+    dup = guard.dedupe_top_entry(existing, stamp, INITIALS)
+    if dup and not a.amend:
+        die(f"{slug} already has a {stamp} {INITIALS}: entry today — pass --amend to "
+            f"replace it, or use different text if this is genuinely a second entry.",
+            E_REFUSED)
+    if a.amend and dup:
+        new = guard.amend_top_entry(existing, text)
+    else:
+        new = text + ("\n" + existing if existing else "")
     if len(new) > 100000:
         die("SE Activity would exceed the 100k field limit", E_ERR)
+
+    rec = guard.guarded_patch(oid, slug, "Sales_Engineer_Overview__c", new, existing,
+                              reason="activity" + (" --amend" if (a.amend and dup) else ""),
+                              allow=a.allow, dry_run=a.dry_run)
     if a.dry_run:
-        emit(f"dry-run {slug} {oid}", f"would prepend: {text}",
+        emit(f"dry-run {slug} {oid}",
+             f"would {'amend' if (a.amend and dup) else 'prepend'}: {text}",
              f"len {len(existing)} -> {len(new)}", nxt("re-run without --dry-run"))
         return
-    sf_patch(oid, {"Sales_Engineer_Overview__c": new})
-    check = sf_query(f"SELECT Sales_Engineer_Overview__c FROM Opportunity WHERE Id = '{oid}'")
-    got = first_line(check[0].get("Sales_Engineer_Overview__c") if check else "")
-    ok = got == text.split("\n")[0]
-    emit(toon("write", ["opp", "slug", "field", "verified"],
+    ok = rec["status"] == "verified"
+    emit(toon("write", ["opp", "slug", "field", "status", "id"],
               [{"opp": oid[:15], "slug": slug, "field": "Sales_Engineer_Overview__c",
-                "verified": ok}]),
-         f"prepended: {got}",
+                "status": rec["status"], "id": rec["id"]}]),
+         f"{'amended' if (a.amend and dup) else 'prepended'}: {text}",
          "" if ok else "WARNING: readback mismatch — inspect the record.",
-         nxt(f"opp-axi opp {slug}", "opp-axi sweep"))
+         nxt(f"opp-axi opp {slug}", "opp-axi sweep", "opp-axi writes"))
     if not ok:
         sys.exit(E_ERR)
 
@@ -1748,11 +1749,36 @@ def main():
     s.add_argument("--closed-days", type=int, default=30)
     s.set_defaults(fn=cmd_sweep)
 
-    s = sub.add_parser("activity", help="prepend an SE Activity entry (REST PATCH, verified)")
+    s = sub.add_parser("activity", help="prepend an SE Activity entry (guarded PATCH, verified)")
     s.add_argument("ref")
     s.add_argument("--add", required=True, help="entry text; date+initials auto-stamped")
+    s.add_argument("--amend", action="store_true",
+                  help="replace today's entry instead of refusing the same-day dupe")
+    s.add_argument("--allow", action="append", default=[], metavar="RULE",
+                  help="override a lint rule (repeatable); recorded in the audit log")
     s.add_argument("--dry-run", action="store_true")
     s.set_defaults(fn=cmd_activity)
+
+    s = sub.add_parser("field", help="write one or more SE-owned fields (guarded PATCH, "
+                       "verified) -- named 'field' not 'set': a shell guard blocks 'set'")
+    s.add_argument("ref")
+    s.add_argument("fields", nargs="+", metavar="Field=value")
+    s.add_argument("--if-empty", action="store_true",
+                  help="write only where the field is currently empty")
+    s.add_argument("--reason", help="short reason recorded in the audit log")
+    s.add_argument("--dry-run", action="store_true")
+    s.set_defaults(fn=guard.cmd_field)
+
+    s = sub.add_parser("undo", help="restore a guarded write's prior value")
+    s.add_argument("write_id")
+    s.add_argument("--dry-run", action="store_true")
+    s.set_defaults(fn=guard.cmd_undo)
+
+    s = sub.add_parser("writes", help="audit log of guarded writes (latest status per id)")
+    s.add_argument("--since", help="M/D/YY")
+    s.add_argument("--opp", help="filter by slug")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(fn=guard.cmd_writes)
 
     s = sub.add_parser("cal", help="calendar, normalized + opp-matched")
     s.add_argument("--date", default="today", help="today|tomorrow|YYYY-MM-DD")
