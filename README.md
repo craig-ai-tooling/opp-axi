@@ -84,6 +84,7 @@ there are five should say so.
 | `OPP_WISPR` | `on` | `off` declares Wispr out of scope |
 | `OPP_WISPR_DIR` | `~/.cache/opp-axi/wispr` | meeting cache (outside the repo: verbatim customer speech) |
 | `OPP_PATTERNS` | `~/code/ai-lawnmower/patterns/patterns.yaml` | `triage` rules |
+| `OPP_AXI_STATE` | `$XDG_STATE_HOME/opp-axi` or `~/.local/state/opp-axi` | write locks + audit log (`writes.jsonl`) |
 
 ## Exit codes
 
@@ -106,7 +107,10 @@ opp-axi                      # overview (no args = live data)
 opp-axi opps                 # open opps
 opp-axi opp <ref>            # one opp
 opp-axi sweep                # weekly-sweep coverage
-opp-axi activity <ref> --add "..."   # prepend an SE Activity entry (verified PATCH)
+opp-axi activity <ref> --add "..."   # prepend an SE Activity entry (guarded, verified)
+opp-axi field <ref> Field=value [Field=value ...]   # write SE-owned fields (guarded)
+opp-axi undo <write-id>       # restore a guarded write's prior value
+opp-axi writes                # audit log of guarded writes
 opp-axi cal --date today
 opp-axi mail 'subject:X newer_than:2d'
 opp-axi evidence <ref>       # cal + zoom + mail + repo + wispr
@@ -117,6 +121,27 @@ opp-axi doctor               # what is configured, what is not
 opp-axi brief <ref>          # a budgeted slice of OPP.md, not the whole file
 opp-axi log <ref> "text"     # append a dated Log entry without reading the file
 ```
+
+## Writing
+
+`activity`, `field` and `undo` are the only write paths, and every one of them goes
+through the same guard (`opp_axi/guard.py`): a per-opp lock held across a re-read,
+compare and PATCH; a compare-and-swap that refuses (exit 4) if the field changed
+since you last read it; and an audit line in `~/.local/state/opp-axi/writes.jsonl`
+written BEFORE the PATCH and confirmed after, so a crash mid-write still leaves a
+`pending` record rather than nothing. `opp-axi writes` lists that log; `opp-axi undo
+<id>` reverts one entry, but only if the field still holds exactly what that write
+put there.
+
+`field` is deliberately not called `set` — a global shell guard on this box blocks
+the bare word `set` as a command.
+
+`activity` additionally refuses a second same-day entry unless you pass `--amend`,
+and lints the text before it ever reaches Salesforce (correction-framing, process
+critique, internal pricing/roadmap/competitive mentions). `--allow <rule>` overrides
+a specific lint rule; the override is recorded in the audit line, never applied
+silently. `--dry-run` runs the same lint/dedupe/compare-and-swap checks and prints
+what would change, without writing anything — not even an audit line.
 
 ## Build from source
 
