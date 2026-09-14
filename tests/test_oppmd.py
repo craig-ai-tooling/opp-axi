@@ -216,17 +216,26 @@ class Brief(unittest.TestCase):
 
 
 class PriorityTrimming(unittest.TestCase):
-    """9/14/26 real-data review: `brief optum` spent the whole budget on Snapshot and
-    Decisions, then reported "cut 22 older log line(s)" — zero recent Log headlines
-    survived, and Decisions was cut mid-word ("workshop o"). Recent Log headlines are
-    the most valuable thing in a brief, so cutting must spend in the OPPOSITE priority
-    order: extra sections, then Risks, then Decisions, then Snapshot down to its lead
-    paragraph, and only then Log headlines — at whole paragraph/bullet boundaries, never
-    mid-word — with a floor of the 10 newest in-window headlines.
+    """9/14/26 real-data review #1: `brief optum` spent the whole budget on Snapshot
+    and Decisions, then reported "cut 22 older log line(s)" — zero recent Log
+    headlines survived, and Decisions was cut mid-word ("workshop o"). Fixed with a
+    Log-headline floor (10 newest in-window) that is only ever touched after every
+    section has given up everything it can.
+
+    9/14/26 real-data review #2, same day: strict tier exhaustion then wiped Risks
+    and all of Decisions before Snapshot's much bigger pre-9/8 history paragraph was
+    ever touched — current blockers matter more than old history. Fixed with
+    per-section floors (Snapshot's lead block; Decisions' 3 newest dated bullets, or
+    first 3 if undated; Risks' first 3 blocks; an extra --section's first block) and
+    round-robin trimming ABOVE those floors: each step drops from whichever section
+    is currently largest in bytes, so big sections shrink together instead of one
+    being wiped while another sits untouched.
 
     fixtures/oppmd/priority.md is sized so that everything does not fit under the
-    default 1500-token budget: a 7-paragraph Snapshot, a 14-bullet dated Decisions list,
-    a 3-bullet undated Risks list, and 15 in-window Log entries.
+    default 1500-token budget: a 7-paragraph Snapshot, a 14-bullet dated Decisions
+    list, a 3-bullet undated Risks list (exactly at its floor — never touched), and
+    15 in-window Log entries. Snapshot and Decisions start comparable in size, so
+    round-robin shrinks BOTH rather than draining one before the other.
     """
 
     def test_default_budget_protects_headlines_and_the_newest_decision(self):
@@ -237,12 +246,17 @@ class PriorityTrimming(unittest.TestCase):
         headlines = re.findall(r"^\d{4}-\d{2}-\d{2} Headline for entry \d+\.$", out, re.M)
         self.assertGreaterEqual(len(headlines), 10, "all 15 are in-window; the floor is 10")
 
-        # Risks (undated, lowest tier below Snapshot/Decisions) and part of Decisions
-        # had to give way to fit — proving the cutting order actually ran extras/Risks
-        # before touching Decisions, and Decisions before Snapshot or any headline.
-        self.assertIn('[Risks / blockers:', out)
+        # Risks has exactly 3 bullets — already at its floor of 3 — so round-robin
+        # never touches it: no marker, all three survive.
+        self.assertNotIn('[Risks / blockers:', out)
+        for i in range(3):
+            self.assertIn(f"Risk item {i}:", out)
+
+        # Snapshot and Decisions are both well above their floors and comparable in
+        # size, so round-robin shrinks BOTH of them some — not one to nothing while
+        # the other sits untouched, which is exactly the bug this fixture pins.
+        self.assertIn('[Snapshot:', out)
         self.assertIn('[Decisions & commitments:', out)
-        self.assertNotIn('[Snapshot:', out)             # Snapshot never had to give way here
 
         self.assertIn("SNAPFIRST-MARKER", out)           # Snapshot's lead paragraph survives
         self.assertIn("NEWEST-DECISION-MARKER", out)      # the newest decision bullet survives
@@ -256,7 +270,7 @@ class PriorityTrimming(unittest.TestCase):
             r"(?:Detail padding on the decision rationale at some length\. ){3}"
             r"Detail padding on the decision rationale at some length\.$")
         bullets = [ln for ln in dec_block.split("\n") if ln.startswith("- ")]
-        self.assertGreater(len(bullets), 0)
+        self.assertGreaterEqual(len(bullets), 3, "Decisions must keep at least its floor of 3")
         for ln in bullets:
             self.assertRegex(ln, bullet_re, f"truncated mid-word: {ln!r}")
 
@@ -270,13 +284,20 @@ class PriorityTrimming(unittest.TestCase):
         self.assertEqual(oppmd._section_priority("Risks"), 2)
         self.assertEqual(oppmd._section_priority("Technical environment"), 3)
 
-    def test_drop_order_is_oldest_dated_block_first(self):
+    def test_dated_drop_order_is_oldest_dated_block_first(self):
         blocks = ["- 2026-08-01: old", "- 2026-09-01: new", "- 2026-07-01: oldest"]
-        self.assertEqual(oppmd._drop_order(blocks), [2, 0, 1])
+        self.assertEqual(oppmd._dated_drop_order(blocks), [2, 0, 1])
 
-    def test_drop_order_falls_back_to_from_the_end_with_no_dates(self):
+    def test_dated_drop_order_falls_back_to_from_the_end_with_no_dates(self):
         blocks = ["- a", "- b", "- c"]
-        self.assertEqual(oppmd._drop_order(blocks), [2, 1, 0])
+        self.assertEqual(oppmd._dated_drop_order(blocks), [2, 1, 0])
+
+    def test_positional_drop_order_ignores_dates(self):
+        """Risks' floor is "first N blocks", always positional — a Risk bullet that
+        happens to contain a date must not be treated as more or less droppable for
+        it."""
+        blocks = ["- 2026-09-01: newest-looking but positionally first", "- b", "- c"]
+        self.assertEqual(oppmd._positional_drop_order(blocks), [2, 1, 0])
 
     def test_split_blocks_detects_bullets_vs_paragraphs(self):
         kind, blocks = oppmd._split_blocks("- one\n- two\n- three")
@@ -285,6 +306,64 @@ class PriorityTrimming(unittest.TestCase):
         kind, blocks = oppmd._split_blocks("Paragraph one.\n\nParagraph two.")
         self.assertEqual(kind, "paragraphs")
         self.assertEqual(len(blocks), 2)
+
+    def test_a_section_at_its_floor_is_never_touched(self):
+        """Risks with exactly 3 bullets has zero droppable blocks above its floor of
+        3 — round-robin must skip it entirely, at any budget small enough that other
+        sections still have something to give."""
+        _fm, sections, _entries = oppmd.parse(open(fixture("priority.md")).read())
+        st = oppmd._section_state("Risks", "Risks / blockers", sections["Risks / blockers"])
+        self.assertEqual(st["floor_len"], 0)
+
+    def test_round_robin_shrinks_the_bigger_section_first(self):
+        states = [
+            oppmd._section_state("Decisions", "Decisions & commitments",
+                                 "- 2026-01-01: a\n- 2026-01-02: bb\n- 2026-01-03: ccc\n"
+                                 "- 2026-01-04: dddd\n- 2026-01-05: eeeee"),
+            oppmd._section_state("Risks", "Risks / blockers",
+                                 "- x\n- y\n- z\n- a very much longer risk bullet than the "
+                                 "others by a wide margin so this section starts biggest"),
+        ]
+        first = oppmd._largest_above_floor(states)
+        self.assertEqual(states[first]["name"], "Risks / blockers")
+
+    def test_size_tie_goes_to_the_lower_priority_section(self):
+        same_bullets = "- item one\n- item two\n- item three\n- item four\n- item five"
+        states = [
+            oppmd._section_state("Decisions", "Decisions & commitments", same_bullets),
+            oppmd._section_state("Risks", "Risks / blockers", same_bullets),
+        ]
+        # byte-identical by construction (same text in both); Risks (priority 2,
+        # lower priority than Decisions' 1) must win the tie
+        self.assertEqual(oppmd._current_bytes(states[0]), oppmd._current_bytes(states[1]))
+        first = oppmd._largest_above_floor(states)
+        self.assertEqual(states[first]["name"], "Risks / blockers")
+
+
+class RoundRobinFloors(unittest.TestCase):
+    """A fixture where Snapshot is far bigger than Decisions or Risks: round-robin
+    should spend almost entirely on Snapshot, while Decisions and Risks — already
+    small, both above their floor of 3 — keep everything they have."""
+
+    def test_all_three_sections_keep_at_least_their_floor(self):
+        out = oppmd.brief(fixture("floors.md"), "floors", since="2026-08-16",
+                          budget=oppmd.DEFAULT_BUDGET_TOKENS)
+        self.assertLessEqual(len(out.encode("utf-8")), oppmd.DEFAULT_BUDGET_TOKENS * 4)
+
+        headlines = re.findall(r"^\d{4}-\d{2}-\d{2} Headline for entry \d+\.$", out, re.M)
+        self.assertGreaterEqual(len(headlines), 10)
+
+        dec_kept = len(re.findall(r"^- \d{4}-\d{2}-\d{2}: .*Decision bullet \d+\.", out, re.M))
+        self.assertGreaterEqual(dec_kept, 3, "Decisions must keep at least its floor of 3")
+
+        risk_kept = len(re.findall(r"^- Risk item \d+:", out, re.M))
+        self.assertGreaterEqual(risk_kept, 3, "Risks must keep at least its floor of 3")
+
+        self.assertIn("SNAPFIRST-MARKER", out)   # Snapshot keeps at least its lead block
+        self.assertIn("NEWEST-DECISION-MARKER", out)
+
+        # Snapshot is the one that actually gave way — it dwarfs the other two.
+        self.assertIn('[Snapshot:', out)
 
 
 # ── log insert ───────────────────────────────────────────────────────────────
