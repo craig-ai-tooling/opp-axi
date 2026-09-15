@@ -35,7 +35,69 @@ from opp_axi import __version__, guard, oppmd, rep
 # Packaged as a zipapp, __file__ is inside the archive, so the old
 # dirname(dirname(realpath(__file__))) trick cannot find the opp repo any more.
 # The data repo is now named explicitly and `doctor` checks that it exists.
-REPO = os.environ.get("OPP_REPO") or os.path.expanduser("~/code/customer-opportunities")
+_DEFAULT_REPO = os.path.expanduser("~/code/customer-opportunities")
+
+
+def _cwd_customer_opportunities_root(start=None):
+    """The customer-opportunities checkout or worktree containing START
+    (default: the real cwd), plus why it was trusted -- or (None, None).
+
+    A customer-chief session running in its OWN git worktree (cos/W3) must
+    have opp-axi write THERE, not into the shared primary checkout at
+    ~/code/customer-opportunities -- crswd sessions cannot be given env vars
+    and shell state does not persist between tool calls, so OPP_REPO cannot
+    simply be exported for it. Detected two ways, either sufficient:
+
+      * the git toplevel contains automation/checks.py AND at least one
+        */.salesforce.json one level down -- the shape of a real checkout or
+        worktree of this repo; or
+      * the git toplevel's `origin` remote URL ends in
+        customer-opportunities(.git) -- catches a freshly scaffolded
+        worktree that has no opp dirs yet.
+
+    Never raises: a `git` that is missing, times out, or answers "not a
+    repo" all mean the same thing here -- fall through to the default.
+    """
+    try:
+        p = subprocess.run(["git", "rev-parse", "--show-toplevel"],
+                           cwd=start or os.getcwd(), capture_output=True,
+                           text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return None, None
+    top = p.stdout.strip() if p.returncode == 0 else ""
+    if not top or not os.path.isdir(top):
+        return None, None
+
+    if os.path.isfile(os.path.join(top, "automation", "checks.py")) and \
+            glob.glob(os.path.join(top, "*", ".salesforce.json")):
+        return top, ("cwd is a worktree/checkout of customer-opportunities "
+                     "(automation/checks.py + */.salesforce.json)")
+
+    try:
+        r = subprocess.run(["git", "-C", top, "remote", "get-url", "origin"],
+                           capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return None, None
+    origin = r.stdout.strip() if r.returncode == 0 else ""
+    if origin and re.search(r"/customer-opportunities(\.git)?/?$", origin):
+        return top, "cwd is a worktree/checkout of customer-opportunities (origin remote)"
+    return None, None
+
+
+def _resolve_repo():
+    """(path, source) for REPO below. OPP_REPO always wins outright; otherwise
+    a customer-opportunities checkout/worktree containing the cwd wins over
+    the hardcoded default -- see _cwd_customer_opportunities_root()."""
+    env = os.environ.get("OPP_REPO")
+    if env:
+        return env, "OPP_REPO env var"
+    detected, why = _cwd_customer_opportunities_root()
+    if detected:
+        return detected, why
+    return _DEFAULT_REPO, f"default {_DEFAULT_REPO} (cwd is not a customer-opportunities checkout)"
+
+
+REPO, REPO_SOURCE = _resolve_repo()
 ORG = os.environ.get("SF_ORG", "spectrocloud")
 ME = os.environ.get("OPP_SE", "CraigSmith")
 INITIALS = os.environ.get("OPP_INITIALS", "CS")
@@ -1793,7 +1855,10 @@ def cmd_doctor(a):
                      "detail": detail + (f" | fix: {fix}" if fix else "")})
 
     cfg = [
-        {"var": "OPP_REPO",      "value": REPO,     "source": _src("OPP_REPO")},
+        # source is the actual reason REPO resolved the way it did -- an env
+        # var, a detected worktree/checkout, or the hardcoded default -- not
+        # merely "env" vs "default" the way every other row's _src() answers.
+        {"var": "OPP_REPO",      "value": REPO,     "source": REPO_SOURCE},
         {"var": "SF_ORG",        "value": ORG,      "source": _src("SF_ORG")},
         {"var": "OPP_SE",        "value": ME,       "source": _src("OPP_SE")},
         {"var": "OPP_INITIALS",  "value": INITIALS, "source": _src("OPP_INITIALS")},
