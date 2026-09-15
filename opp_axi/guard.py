@@ -97,7 +97,18 @@ def _read_field(opp_id, field):
     return recs[0].get(field)
 
 
-def _same(a, b):
+def _is_multipicklist(field):
+    """True if `field` (an API name) is declared `multipicklist` in `opp-axi fields
+    write` — `cli.FIELDS["write"]` is the one place the code already knows field
+    types (see `_resolve_field()`), so this reads that table rather than keeping a
+    second list. A field with no entry there (or any other declared kind) is not
+    a multipicklist, full stop — a plain text field that happens to contain ';' is
+    never guessed into one."""
+    return any(api == field and kind == "multipicklist"
+               for _label, api, kind, _values in cli.FIELDS["write"])
+
+
+def _same(a, b, field=None):
     """Value equality tolerant of Salesforce's own normalization: None and "" are
     the same fact (empty), and text differs only if it differs after CRLF and
     trailing-whitespace normalization.
@@ -105,13 +116,29 @@ def _same(a, b):
     Without this, a successful write can read back as a false `mismatch` — a
     textarea round-trips \\n as \\r\\n, or Salesforce trims trailing whitespace —
     and `undo` then refuses FOREVER, because `current != rec["new"]` never
-    matches again even though nothing is actually wrong."""
+    matches again even though nothing is actually wrong.
+
+    `field`, when given, is the API name of the field being compared. Salesforce
+    stores a multipicklist in picklist-DEFINITION order, not the order it was
+    sent in, so a correct write's read-back can differ from what was written by
+    member order alone. When `field` is declared `multipicklist` (per
+    `_is_multipicklist`, the code's existing field-type table), the two sides are
+    compared as sets of ';'-separated, whitespace-stripped members instead of as
+    a literal string. Without a declared type there is no way to tell a
+    multipicklist from a textarea that happens to contain ';', so anything not in
+    that table — including a plain text field — still compares as an exact
+    (normalized) string."""
     if a is None:
         a = ""
     if b is None:
         b = ""
     if isinstance(a, str) and isinstance(b, str):
-        return a.replace("\r\n", "\n").rstrip() == b.replace("\r\n", "\n").rstrip()
+        a = a.replace("\r\n", "\n").rstrip()
+        b = b.replace("\r\n", "\n").rstrip()
+        if field and _is_multipicklist(field):
+            to_set = lambda s: {part.strip() for part in s.split(";") if part.strip()}
+            return to_set(a) == to_set(b)
+        return a == b
     return a == b
 
 
@@ -210,7 +237,7 @@ def guarded_patch(opp_id, slug, field, new_value, expected_old, *, reason, allow
             _append_audit({**base, "status": "failed"})
             raise
         readback = _read_field(opp_id, field)
-        status = "verified" if _same(readback, new_value) else "mismatch"
+        status = "verified" if _same(readback, new_value, field) else "mismatch"
         record = {**base, "status": status}
         _append_audit(record)
         return record
@@ -408,7 +435,7 @@ def cmd_undo(a):
         cli.die(f"write {a.write_id} is '{rec.get('status')}', not verified — refusing to undo",
                  cli.E_REFUSED)
     current = _read_field(rec["opp"], rec["field"])
-    if not _same(current, rec["new"]):
+    if not _same(current, rec["new"], rec["field"]):
         cli.die(f"{rec['field']} on {rec['slug']} no longer matches write {a.write_id} — "
                  f"refusing undo.\n  recorded: {cli.first_line(rec['new'] or '')}\n"
                  f"  current:  {cli.first_line(current or '')}", cli.E_REFUSED)
