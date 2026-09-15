@@ -74,11 +74,11 @@ class StateDirCase(unittest.TestCase):
 
 
 class TestVersionBump(unittest.TestCase):
-    def test_version_is_0_1_10(self):
-        # 0.1.9 was tagged from the rep verb's own bump (#12/#13) while
-        # cos/opp-repo-follows-worktree was open, so REPO-follows-cwd needs its
-        # own bump to reach the installed binary: 0.1.10.
-        self.assertEqual(__version__, "0.1.10")
+    def test_version_is_0_1_11(self):
+        # 0.1.10 was tagged from the REPO-follows-cwd fix (#14); the multipicklist
+        # set-comparison fix needs its own bump to reach the installed binary:
+        # 0.1.11.
+        self.assertEqual(__version__, "0.1.11")
 
 
 class TestStateDir(StateDirCase):
@@ -165,6 +165,61 @@ class TestGuardedPatch(StateDirCase):
         self.assertNotEqual(record["Sales_Engineer_Overview__c"], "line one\nline two  \n",
                             "the fake backend must actually normalize, or this proves nothing")
 
+    def test_readback_reordered_multipicklist_verifies(self):
+        """Salesforce stores a multipicklist in picklist-DEFINITION order, not send
+        order. w-20260915T061536Z-3988 wrote 'Product complexity;Missing features'
+        to Tech_Risk_Rational__c (a declared multipicklist) and Salesforce held
+        'Missing features;Product complexity' — same members, different order —
+        and that used to read back as a false `mismatch`."""
+        record = {"Tech_Risk_Rational__c": "OLD"}
+        fake_query, _ = _fake_sf(record)
+
+        def fake_patch_reorders(opp_id, body):
+            record["Tech_Risk_Rational__c"] = "Missing features;Product complexity"
+
+        with mock.patch.object(cli, "sf_query", side_effect=fake_query), \
+             mock.patch.object(guard, "sf_patch", side_effect=fake_patch_reorders):
+            rec = guard.guarded_patch(OID, "acme", "Tech_Risk_Rational__c",
+                                      "Product complexity;Missing features", "OLD",
+                                      reason="test")
+        self.assertEqual(rec["status"], "verified")
+        self.assertNotEqual(record["Tech_Risk_Rational__c"], rec["new"],
+                            "the fake backend must actually reorder, or this proves nothing")
+
+    def test_readback_multipicklist_different_set_is_still_mismatch(self):
+        """A genuinely different multipicklist value — not just reordered — must
+        still be flagged. Set-comparison must not become 'anything with a
+        semicolon matches'."""
+        record = {"Tech_Risk_Rational__c": "OLD"}
+        fake_query, _ = _fake_sf(record)
+
+        def fake_patch_wrong_set(opp_id, body):
+            record["Tech_Risk_Rational__c"] = "Missing features;Complex licensing"
+
+        with mock.patch.object(cli, "sf_query", side_effect=fake_query), \
+             mock.patch.object(guard, "sf_patch", side_effect=fake_patch_wrong_set):
+            rec = guard.guarded_patch(OID, "acme", "Tech_Risk_Rational__c",
+                                      "Product complexity;Missing features", "OLD",
+                                      reason="test")
+        self.assertEqual(rec["status"], "mismatch")
+
+    def test_readback_reordered_semicolons_on_non_multipicklist_field_still_mismatch(self):
+        """Only a field declared `multipicklist` in cli.FIELDS["write"] gets set
+        comparison. A plain text field that happens to contain ';' (not declared
+        multipicklist) must still compare as an exact string, or a genuine mismatch
+        on a text field would be silently forgiven."""
+        record = {"Sales_Engineer_Overview__c": "OLD"}
+        fake_query, _ = _fake_sf(record)
+
+        def fake_patch_reorders(opp_id, body):
+            record["Sales_Engineer_Overview__c"] = "b;a"
+
+        with mock.patch.object(cli, "sf_query", side_effect=fake_query), \
+             mock.patch.object(guard, "sf_patch", side_effect=fake_patch_reorders):
+            rec = guard.guarded_patch(OID, "acme", "Sales_Engineer_Overview__c",
+                                      "a;b", "OLD", reason="test")
+        self.assertEqual(rec["status"], "mismatch")
+
     def test_patch_failure_appends_failed_line_and_reraises(self):
         """sf_patch dies via cli.die() -> SystemExit. A pending line with no
         outcome would claim a write is still in flight when it never happened."""
@@ -248,6 +303,34 @@ class TestSame(unittest.TestCase):
         self.assertTrue(guard._same(True, True))
         self.assertFalse(guard._same(True, False))
         self.assertFalse(guard._same(False, ""))   # False is a fact, not "empty"
+
+    def test_multipicklist_field_compares_members_as_a_set(self):
+        self.assertTrue(guard._same("Product complexity;Missing features",
+                                    "Missing features;Product complexity",
+                                    field="Tech_Risk_Rational__c"))
+        self.assertTrue(guard._same("AWS;Azure", "Azure ; AWS",
+                                    field="Secondary_Environment_s__c"),
+                        "whitespace around a member must be stripped too")
+
+    def test_multipicklist_field_still_catches_a_real_mismatch(self):
+        self.assertFalse(guard._same("Product complexity;Missing features",
+                                     "Missing features;Complex licensing",
+                                     field="Tech_Risk_Rational__c"))
+
+    def test_no_field_or_non_multipicklist_field_compares_literally(self):
+        # No declared type at all: never guessed into a multipicklist just
+        # because the string contains ';'.
+        self.assertFalse(guard._same("a;b", "b;a"))
+        # A declared type that is NOT multipicklist: still literal.
+        self.assertFalse(guard._same("a;b", "b;a", field="Sales_Engineer_Overview__c"))
+        # Unknown field name: no type info available, so literal too.
+        self.assertFalse(guard._same("a;b", "b;a", field="Not_A_Real_Field__c"))
+
+    def test_is_multipicklist(self):
+        self.assertTrue(guard._is_multipicklist("Tech_Risk_Rational__c"))
+        self.assertTrue(guard._is_multipicklist("Secondary_Environment_s__c"))
+        self.assertFalse(guard._is_multipicklist("Sales_Engineer_Overview__c"))
+        self.assertFalse(guard._is_multipicklist("Not_A_Real_Field__c"))
 
 
 class TestLint(unittest.TestCase):
@@ -539,6 +622,38 @@ class TestCmdUndo(StateDirCase):
                                 "from the recorded `new`, or this proves nothing")
             guard.cmd_undo(self._ns(rec["id"]))
         self.assertEqual(record["Sales_Engineer_Overview__c"], "OLD")
+
+    def test_undo_proceeds_despite_multipicklist_reorder(self):
+        """The repro this task fixes: w-20260915T061536Z-3988 wrote 'Product
+        complexity;Missing features' to Tech_Risk_Rational__c and Salesforce held
+        'Missing features;Product complexity'. That used to mark the write
+        `mismatch` at write time, so `undo` refused it outright ("is 'mismatch',
+        not verified") -- never even reaching the current-value comparison this
+        test targets."""
+        record = {"Tech_Risk_Rational__c": "OLD"}
+
+        def fake_query(soql, timeout=180):
+            return [dict(record)]
+
+        def fake_patch_reorders(opp_id, body):
+            """Models Salesforce's picklist-definition ordering for exactly the two
+            members this write sends; any other value (e.g. undo restoring "OLD")
+            is stored as sent, same as a real single-value save would be."""
+            sent = body["Tech_Risk_Rational__c"]
+            members = {part.strip() for part in sent.split(";") if part.strip()}
+            if members == {"Product complexity", "Missing features"}:
+                record["Tech_Risk_Rational__c"] = "Missing features;Product complexity"
+            else:
+                record["Tech_Risk_Rational__c"] = sent
+
+        with mock.patch.object(cli, "sf_query", side_effect=fake_query), \
+             mock.patch.object(guard, "sf_patch", side_effect=fake_patch_reorders):
+            rec = guard.guarded_patch(OID, "acme", "Tech_Risk_Rational__c",
+                                      "Product complexity;Missing features", "OLD",
+                                      reason="test")
+            self.assertEqual(rec["status"], "verified")
+            guard.cmd_undo(self._ns(rec["id"]))
+        self.assertEqual(record["Tech_Risk_Rational__c"], "OLD")
 
     def test_undo_refuses_a_non_verified_write(self):
         with mock.patch.object(cli, "sf_query",
