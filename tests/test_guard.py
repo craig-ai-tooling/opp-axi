@@ -74,10 +74,11 @@ class StateDirCase(unittest.TestCase):
 
 
 class TestVersionBump(unittest.TestCase):
-    def test_version_is_0_1_9(self):
-        # 0.1.8 was tagged from the scaffold pointer fix (#11) while feat/rep-read was
-        # open, so the rep verb needs its own bump to reach the installed binary: 0.1.9.
-        self.assertEqual(__version__, "0.1.9")
+    def test_version_is_0_1_10(self):
+        # 0.1.9 was tagged from the rep verb's own bump (#12/#13) while
+        # cos/opp-repo-follows-worktree was open, so REPO-follows-cwd needs its
+        # own bump to reach the installed binary: 0.1.10.
+        self.assertEqual(__version__, "0.1.10")
 
 
 class TestStateDir(StateDirCase):
