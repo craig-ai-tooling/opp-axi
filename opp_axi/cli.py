@@ -1441,6 +1441,170 @@ def repo_touched_since(slug, since, subdir=None):
     return out
 
 
+# ── coverage: which SE-owned fields are expected by now, and are not filled ───
+#
+# The gap this closes: `sweep` answers "did every opp get an SE Activity entry",
+# which is one field out of twenty. Nothing answered "is the rest of the SE
+# section filled in", and the answer on 9/16/26 was mostly no -- Technical Risk
+# empty on 37 of Craig's 46 open opps, $19.2M of a $22.7M pipeline.
+#
+# EXPECT is the whole policy, as data. Each row is (api, from_stage, why).
+# `from_stage` is the earliest stage at which the field is expected; None means
+# every open opp regardless of stage. Editing this table is how the policy
+# changes -- no other code knows what is expected of what.
+#
+# Provenance is carried in `why`, and every row traces to something a person
+# actually said rather than to an inferred best practice:
+#   * Adam Kentosh, #saleseng-private 8/24/26, asking SAs for deal-review input:
+#     "1. Are we in pov or not  2. Is there technical risk and if yes what is it
+#     3. What would our forecast be based on what we know right now"
+#   * JV in the same thread: "23 Q4 deals 'Not Assessed' = visibility gap; need
+#     SEs to complete risk assessments"
+#   * JV/Craig 1:1 8/25/26: "POVs -- Tech valid plan, start dates, tech risk fields"
+#   * SA weekly sync 9/15/26: "update account notes weekly; use 'NSTR' (nothing
+#     significant to report) if no activity"
+#
+# What is deliberately NOT here: a rule that a Technical Validation Plan must
+# exist before an opp may LEAVE Alignment. Checked 9/16/26 -- the FY2026 sales
+# process deck's own S2 exit criteria say "Success Criteria completed and
+# shared" plus a MAP, and do NOT name a Technical Validation Plan. The gate
+# exists only as one manager's enablement reminder (Colleen DePasquale,
+# #sales-all 3/19/26) and as informal per-customer spreadsheets. So the plan is
+# expected from Prove Value, which is what JV's 1:1 note supports, and no
+# earlier.
+#
+# STAGE_ORDER is the real StageName picklist, open stages only, in order, from
+# `sf sobject describe -s Opportunity`. It is NOT the training deck's narrative
+# flow: that deck opens with "Pipeline Generation" and closes with "Signed &
+# Closed", and neither is a StageName value. Putting a non-existent stage in
+# this list is silent -- _stage_reached() treats an unknown stage as not
+# reached -- so it would quietly stop gating instead of failing.
+STAGE_ORDER = ["Qualification", "Alignment", "Prove Value",
+               "Contract & Negotiation", "Pending Closure"]
+
+EXPECT = [
+    ("Sales_Engineer_Overview__c", None,
+     "weekly note on every open opp; NSTR if nothing happened (SA sync 9/15/26)"),
+    ("Technical_Risk__c", None,
+     "'Not Assessed' is the visibility gap JV named 8/24/26"),
+    ("Hands_on_Eval_POV_URL__c", "Prove Value",
+     "the tech valid plan; JV 1:1 8/25/26"),
+    ("Hands_on_Eval_ActStartDate__c", "Prove Value",
+     "POV start date; JV 1:1 8/25/26"),
+    # The only row here with a written, company-level source rather than a
+    # manager's ask: the FY2026 sales process deck lists "Success Plan Criteria
+    # Template completed" among Stage 4's exit criteria, and the template itself
+    # ("Success Plan Criteria MASTER V2") says "to be completed by the AE/SA ...
+    # prior to exiting Stage 4".
+    ("Has_Technical_Success_Plan__c", "Contract & Negotiation",
+     "S4 exit criterion in the FY2026 sales process; also JV's deal-inspection block"),
+]
+
+# Conditional rows: (api, predicate_field, why). Expected only where the
+# predicate field is filled on that opp -- a reason is owed for a risk that was
+# actually called, and a date for a win that was actually recorded.
+EXPECT_IF = [
+    ("Technical_Risk_Reasoning__c", "Technical_Risk__c",
+     "a risk rating with no reasoning cannot be acted on in a deal review"),
+    ("Technical_Win_Date__c", "POV_Pass__c",
+     "Tech Win checked with no date"),
+]
+
+COVERAGE_FIELDS = sorted({api for api, _, _ in EXPECT} |
+                         {api for api, _, _ in EXPECT_IF} |
+                         {pred for _, pred, _ in EXPECT_IF})
+
+
+def _stage_reached(stage, from_stage):
+    """True when `stage` is at or past `from_stage`. An unrecognised stage counts
+    as NOT reached: inventing a gap on a stage this table has never heard of
+    would be a finding about our own list, not about the opp."""
+    if from_stage is None:
+        return True
+    if stage not in STAGE_ORDER or from_stage not in STAGE_ORDER:
+        return False
+    return STAGE_ORDER.index(stage) >= STAGE_ORDER.index(from_stage)
+
+
+def _filled(v):
+    """Salesforce-empty, for coverage purposes. A checkbox is never null -- it is
+    False -- so an unchecked box counts as not filled, which is the only reading
+    that makes a checkbox gap visible at all."""
+    return v not in (None, "", False)
+
+
+def cmd_coverage(a):
+    """opp-axi coverage — which SE-owned fields are expected by now and are empty.
+
+    Read-only; writes nothing. Two answers: the fill rate of every field in
+    EXPECT across the open pipeline, and the per-opp list of gaps. `sweep` asks
+    this of one field; `coverage` asks it of the SE section.
+    """
+    cols = ",".join(sorted(set(COVERAGE_FIELDS) |
+                           {"Id", "Name", "StageName", "Amount", "CloseDate"}))
+    recs = sf_query(f"SELECT {cols} FROM Opportunity WHERE {OPEN_WHERE} ORDER BY CloseDate")
+    if a.stage:
+        recs = [r for r in recs if (r.get("StageName") or "").lower() == a.stage.lower()]
+    i2s = id_to_slug(opp_index())
+
+    rates, gaps = [], []
+    for api, from_stage, why in EXPECT:
+        due = [r for r in recs if _stage_reached(r.get("StageName") or "", from_stage)]
+        got = [r for r in due if _filled(r.get(api))]
+        rates.append({"field": api, "due": len(due), "have": len(got),
+                      "pct": f"{round(100 * len(got) / len(due))}%" if due else "-",
+                      "from": from_stage or "any stage", "why": why})
+    for api, pred, why in EXPECT_IF:
+        due = [r for r in recs if _filled(r.get(pred))]
+        got = [r for r in due if _filled(r.get(api))]
+        rates.append({"field": api, "due": len(due), "have": len(got),
+                      "pct": f"{round(100 * len(got) / len(due))}%" if due else "-",
+                      "from": f"if {pred}", "why": why})
+
+    for r in recs:
+        stage = r.get("StageName") or ""
+        miss = [api for api, from_stage, _ in EXPECT
+                if _stage_reached(stage, from_stage) and not _filled(r.get(api))]
+        miss += [api for api, pred, _ in EXPECT_IF
+                 if _filled(r.get(pred)) and not _filled(r.get(api))]
+        if miss:
+            gaps.append({"slug": i2s.get(r["Id"][:15], "-"), "stage": stage,
+                         "amt": money(r.get("Amount")), "close": r.get("CloseDate"),
+                         "missing": " ".join(miss)})
+    # Worst first: most gaps, then largest deal. A $3M opp missing one field and
+    # a $10k opp missing five both belong above the tail.
+    gaps.sort(key=lambda g: (-len(g["missing"].split()), -_amount(g["amt"])))
+    shown = gaps[:a.limit] if a.limit else gaps
+
+    if a.json:
+        print(json.dumps({"se": ME, "opps": len(recs), "rates": rates,
+                          "gaps": gaps}, indent=2))
+        return
+    emit(f"coverage se={ME} opps={len(recs)}" + (f" stage={a.stage}" if a.stage else ""),
+         toon("rates", ["field", "due", "have", "pct", "from"], rates),
+         "",
+         toon("gaps", ["slug", "stage", "amt", "close", "missing"], shown),
+         f"\nclean: {len(recs) - len(gaps)}/{len(recs)}" +
+         (f"  [+{len(gaps) - len(shown)} more, --limit 0]" if len(shown) < len(gaps) else ""),
+         # The citation travels with the rate. A coverage report that cannot say
+         # who asked for a field is a scold, and gets ignored like one.
+         "\nwhy:\n" + "\n".join(f"  {r['field']}: {r['why']}" for r in rates),
+         nxt("opp-axi field <slug> <Field>=<value>", "opp-axi fields write")
+         if gaps else nxt("nothing to fill"))
+
+
+def _amount(s):
+    """'$1.2M' / '$750K' / '-' back to a number, for sorting only."""
+    if not s or s == "-":
+        return 0.0
+    t = str(s).lstrip("$").replace(",", "")
+    mult = {"M": 1e6, "K": 1e3, "B": 1e9}.get(t[-1:].upper())
+    try:
+        return float(t[:-1]) * mult if mult else float(t)
+    except ValueError:
+        return 0.0
+
+
 def cmd_triage(a):
     """Signal -> pattern -> proposed work. The middle piece the system was missing.
 
@@ -1629,15 +1793,36 @@ FIELDS = {
         ("SE Activity", "Sales_Engineer_Overview__c", "textarea 100k", "PREPEND; M/D/YY CS:"),
         ("Tech Risk Status", "Tech_Risk_Status__c", "picklist", "'\U0001f534 High'|'\U0001f7e2 Low' ONLY (emoji is the value)"),
         ("Tech Risk Rational", "Tech_Risk_Rational__c", "multipicklist", "semicolon-separated"),
+        # The SECOND technical-risk pair. Opportunity carries two, under different API
+        # names, and both are live and updateable. This one is the more used of the two
+        # company-wide (57 open opps vs 39 for Tech_Risk_Status__c, measured 9/16/26) and
+        # it is the pair leadership's deal reviews quote -- Adam Kentosh asked for
+        # "is there technical risk and if yes what is it" on 8/24/26 and JV answered out
+        # of these, reporting 23 Q4 deals "Not Assessed" as a visibility gap.
+        # opp-axi knew neither field until 9/16/26, so the sanctioned write path could
+        # not set them at all. WHICH pair is canonical is unsettled -- see
+        # docs/two-risk-fields.md. Both are writable here; nothing writes either
+        # implicitly.
+        ("Technical Risk", "Technical_Risk__c", "picklist", "High|Low (plain text, no emoji)"),
+        ("Technical Risk Reasoning", "Technical_Risk_Reasoning__c", "textarea 32k", "narrative; text, urls, images"),
         ("Tech Win", "POV_Pass__c", "boolean", "auto-stamps Technical_Win_Date__c"),
         ("Solution Validated", "Solution_Validated__c", "boolean", ""),
         ("POV Required", "Hands_on_Eval_Required__c", "boolean", ""),
         ("POV Start", "Hands_on_Eval_ActStartDate__c", "date", "YYYY-MM-DD"),
         ("POV Est Start", "Hands_on_Eval_EstStartDate__c", "date", "YYYY-MM-DD"),
         ("POV Est End", "Hands_on_Eval_EstEndDate__c", "date", "YYYY-MM-DD"),
+        ("POV Actual End", "Hands_on_Eval_ActEndDate__c", "date", "YYYY-MM-DD; closes the POV opened by POV Start"),
         ("Hands-on Eval By", "Hands_on_Eval_By__c", "picklist", "Customer|Partner|Spectro Cloud"),
         ("Validation Plan URL", "Hands_on_Eval_POV_URL__c", "textarea 512", "docs-site URL"),
         ("Technical Notes", "Technical_Notes__c", "textarea 32k", "Lightning page only"),
+        # Post-sales transition. Craig carries 8 opps at Contract & Negotiation and this
+        # is set on 1 of them (9/16/26). It is one of the four fields in JV's
+        # "Deal inspection" block (SE Notes / Tech valid plan / Post-sales transition /
+        # Customer folder), SA weekly sync 9/15/26.
+        ("Has Technical Success Plan", "Has_Technical_Success_Plan__c", "boolean", "post-sales transition plan exists"),
+        # POV_Pass__c auto-stamps this to TODAY. Writable here only so a HISTORICAL win
+        # date can be corrected -- set the flag first, then this on its own.
+        ("Technical Win Date", "Technical_Win_Date__c", "date", "YYYY-MM-DD; POV_Pass__c auto-stamps today"),
         ("Integration Stack", "Integration_Stack__c", "textarea 100k", ""),
         ("Secondary Envs", "Secondary_Environment_s__c", "multipicklist", "AWS|Azure|GCP|Nutanix AHV|OpenStack|vCloud Director|VMware|Bare Metal|Other"),
     ],
@@ -1939,6 +2124,14 @@ def main():
     s.add_argument("--closed", action="store_true", help="also list recently closed opps")
     s.add_argument("--closed-days", type=int, default=30)
     s.set_defaults(fn=cmd_sweep)
+
+    s = sub.add_parser("coverage",
+                       help="SE-field coverage: what is expected by now and is empty")
+    s.add_argument("--stage", help="only this StageName")
+    s.add_argument("--limit", type=int, default=15,
+                   help="gap rows to print; 0 for all (default: 15)")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(fn=cmd_coverage)
 
     s = sub.add_parser("activity", help="prepend an SE Activity entry (guarded PATCH, verified)")
     s.add_argument("ref")

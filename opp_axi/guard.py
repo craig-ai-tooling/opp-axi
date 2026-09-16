@@ -318,6 +318,9 @@ PICKLISTS = {
     "SE_Forecast__c": ["Favorable", "Needs Attention", "At Risk"],
     "Tech_Risk_Status__c": ["\U0001f534 High", "\U0001f7e2 Low"],
     "Hands_on_Eval_By__c": ["Customer", "Partner", "Spectro Cloud"],
+    # Plain High|Low. The describe also lists no Medium on this field, unlike its
+    # emoji twin Tech_Risk_Status__c whose value set carries an inactive Medium.
+    "Technical_Risk__c": ["High", "Low"],
 }
 MULTIPICKLISTS = {
     "Secondary_Environment_s__c": ["AWS", "Azure", "GCP", "Nutanix AHV", "OpenStack",
