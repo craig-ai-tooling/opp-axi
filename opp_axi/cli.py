@@ -904,6 +904,12 @@ if os.environ.get("OPP_PARTNER_DOMAINS"):
     PARTNER_DOMAINS = _p if os.environ.get("OPP_PARTNER_DOMAINS_REPLACE") else PARTNER_DOMAINS | _p
 SKIP_DIRS = {".git", "node_modules", "site", ".terraform", "__pycache__", ".venv"}
 
+# Where loop/mail-probe.py (ai-lawnmower) saves an attachment a customer emailed in.
+# Gitignored in customer-opportunities: the raw file is theirs and carries their
+# license keys and serials. Its one job here is to mark a file as CUSTOMER-sent,
+# which the rest of the opp directory cannot tell you.
+MAIL_INBOX = "mail-inbox"
+
 
 def known_domains(slug):
     """Customer email domains harvested from the opp's own notes — catches domains
@@ -1406,7 +1412,7 @@ def suppression_for(pattern, slug, today):
     return None
 
 
-def repo_touched_since(slug, since):
+def repo_touched_since(slug, since, subdir=None):
     """Files under the opp dir modified since `since`, excluding the notes we write ourselves —
     OPP.md changing is our own footprint, not a customer signal.
 
@@ -1415,7 +1421,8 @@ def repo_touched_since(slug, since):
     9/2/26 -- dropping a draft into an opp dir raised both an
     customer-artifact-awaiting-review and a thin-sweep-entry finding against an opp
     that has had no contact at all."""
-    base = os.path.join(REPO, slug)
+    base = os.path.join(REPO, slug, subdir) if subdir else os.path.join(REPO, slug)
+    rel_to = os.path.join(REPO, slug)
     out = []
     if not os.path.isdir(base):
         return out
@@ -1430,7 +1437,7 @@ def repo_touched_since(slug, since):
             except OSError:
                 continue
             if mt >= since:
-                out.append(os.path.relpath(fp, base))
+                out.append(os.path.relpath(fp, rel_to))
     return out
 
 
@@ -1485,6 +1492,27 @@ def cmd_triage(a):
         if (r.get("StageName") or "") == "Prove Value" and not (r.get("Hands_on_Eval_POV_URL__c") or "").strip():
             add("entering-prove-value", slug or r["Id"][:15],
                 "stage=Prove Value with no validation-plan URL", "Hands_on_Eval_POV_URL__c empty")
+
+        # --- a customer's OWN artifact is not gated on our paperwork -----
+        # Everything below the needs_look gate only runs for opps whose SE Activity
+        # is stale, thin, or someone else's. That is the right ration for evidence
+        # we have to go and fetch, and the wrong one for "a customer is blocked on
+        # us": write an entry after a call, the customer sends the export next
+        # morning, and the artifact never fires because the entry we just wrote made
+        # the opp look handled. Measured 9/16/26 on Denali, whose RVTools export sat
+        # in the opp dir under a same-day CS entry while triage reported nothing.
+        #
+        # Scoped to MAIL_INBOX rather than the whole directory on purpose. The broad
+        # walk below counts every file WE create too -- running it ungated turned one
+        # real finding into six, five of them our own assessments and terraform. What
+        # loop/mail-probe.py saves here came from the customer's own mail, so the
+        # pattern's name is true of it. Costs one os.walk of one subdirectory.
+        if slug:
+            arrived = repo_touched_since(slug, since, subdir=MAIL_INBOX)
+            if arrived:
+                add("customer-artifact-awaiting-review", slug,
+                    f"{len(arrived)} file(s) emailed in by the customer since {since}",
+                    ", ".join(arrived[:3]))
 
         # --- narrow to opps worth spending evidence on -------------------
         needs_look = thin or not d or (d and d < since) or (who and who != INITIALS)
