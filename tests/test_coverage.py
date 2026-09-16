@@ -25,7 +25,9 @@ IDX = {"acme": {"account_name": "Acme Corp",
 
 
 def _args(**kw):
-    ns = argparse.Namespace(stage=None, limit=0, json=False)
+    # half="fields": these predate the repo-collateral half and assert on the
+    # Salesforce tables, which the artifact section would otherwise sit beside.
+    ns = argparse.Namespace(stage=None, limit=0, json=False, half="fields")
     for k, v in kw.items():
         setattr(ns, k, v)
     return ns
@@ -127,7 +129,7 @@ class CoverageReport(unittest.TestCase):
         self.assertIn("Hands_on_Eval_POV_URL__c,0,0,-,Prove Value", rates)
         self.assertNotIn("Hands_on_Eval_POV_URL__c", gaps)
         self.assertIn("(none)", gaps)
-        self.assertIn("clean: 1/1", out)
+        self.assertIn("clean on fields: 1/1", out)
 
     def test_prove_value_opp_is_asked_for_the_pov_fields(self):
         out = _run([_opp("006A", "Prove Value",
@@ -137,7 +139,7 @@ class CoverageReport(unittest.TestCase):
         gaps = out.split("gaps")[1]
         self.assertIn("Hands_on_Eval_POV_URL__c", gaps)
         self.assertIn("Hands_on_Eval_ActStartDate__c", gaps)
-        self.assertIn("clean: 0/1", out)
+        self.assertIn("clean on fields: 0/1", out)
 
     def test_risk_rating_without_reasoning_is_a_gap(self):
         out = _run([_opp("006A", "Qualification",
@@ -167,7 +169,7 @@ class CoverageReport(unittest.TestCase):
         row = [ln for ln in rates.splitlines()
                if "Has_Technical_Success_Plan__c" in ln][0]
         self.assertIn(",1,1,100%,", row)
-        self.assertIn("clean: 2/2", out)
+        self.assertIn("clean on fields: 2/2", out)
 
     def test_stage_filter(self):
         recs = [_opp("006A", "Qualification"), _opp("006B", "Prove Value")]
@@ -180,7 +182,7 @@ class CoverageReport(unittest.TestCase):
         out = _run([])
         self.assertIn("gaps[0]", out)
         self.assertIn("(none)", out)
-        self.assertIn("clean: 0/0", out)
+        self.assertIn("clean on fields: 0/0", out)
 
     def test_json_carries_every_gap_even_when_the_table_is_limited(self):
         recs = [_opp(f"006{i}", "Prove Value") for i in range(5)]
