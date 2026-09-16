@@ -134,6 +134,40 @@ class ArtifactCoverage(unittest.TestCase):
                               Hands_on_Eval_POV_URL__c="https://x")])
         self.assertIn("clean on collateral: 1/1", out)
 
+    def test_clean_denominator_counts_only_scaffolded_opps(self):
+        """Collateral is owed once the folder exists. Scoring the scaffolded ones
+        against the whole pipeline printed "0/46" for 3 opps with 43 that had no
+        directory, which reads as a pipeline-wide failure and is not one."""
+        self._scaffold("acme")                      # complete
+        self._scaffold("beta", claude_md=False)     # has a dir, missing a file
+        out = self._run([_opp("006A", "Qualification", "acme"),
+                         _opp("006B", "Qualification", "beta"),
+                         _opp("006C", "Qualification", "ghost1"),
+                         _opp("006D", "Qualification", "ghost2")])
+        # 4 opps, 2 scaffolded, 1 of those clean.
+        self.assertIn("clean on collateral: 1/2", out)
+        self.assertNotIn("clean on collateral: 1/4", out)
+
+    def test_nothing_is_owed_until_the_directory_exists(self):
+        """The whole rule, end to end: an opp with no folder produces no gap, is
+        absent from every rate denominator, and is listed only as something to
+        scaffold."""
+        self._scaffold("acme")
+        out = self._run([_opp("006A", "Prove Value", "acme",
+                              Hands_on_Eval_POV_URL__c="https://x"),
+                         _opp("006B", "Prove Value", "ghost")])
+        self.assertIn("OPP.md,1,1,100%", out)       # 1 due, not 2
+        self.assertIn("nothing is owed until one exists", out)
+        gaps = out.split("artifactGaps")[1].split("clean on")[0]
+        self.assertNotIn("ghost", gaps)
+
+    def test_no_repo_dir_list_respects_limit(self):
+        self._scaffold("acme")
+        recs = [_opp("006A", "Prove Value", "acme")] + \
+               [_opp(f"006{i}", "Prove Value", f"ghost{i}") for i in range(5)]
+        out = self._run(recs, limit=2)
+        self.assertIn("+3 more", out.split("noRepoDir")[1])
+
     def test_every_artifact_carries_a_reason(self):
         for _path, _gate, _kind, why in cli.EXPECT_ARTIFACT:
             self.assertTrue(why and len(why) > 20)

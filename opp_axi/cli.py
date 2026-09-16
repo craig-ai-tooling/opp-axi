@@ -1671,6 +1671,7 @@ def cmd_coverage(a):
                           "unscaffolded": unscaffolded}, indent=2))
         return
     ashown = agaps[:a.limit] if a.limit else agaps
+    scaffolded = len(recs) - len(unscaffolded)
     parts = [f"coverage se={ME} opps={len(recs)}" + (f" stage={a.stage}" if a.stage else "")]
 
     if a.half in ("both", "fields"):
@@ -1687,15 +1688,23 @@ def cmd_coverage(a):
             toon("artifactRates", ["artifact", "due", "have", "pct", "from"], arates),
             "",
             toon("artifactGaps", ["slug", "stage", "amt", "missing"], ashown),
-            f"\nclean on collateral: {len(recs) - len(agaps) - len(unscaffolded)}/{len(recs)}" +
+            # Denominator is the opps that HAVE a directory, never all of them.
+            # Collateral is owed once the folder exists; an opp with no folder is
+            # not behind on it. Scoring 3 scaffolded opps out of 46 printed
+            # "0/46" and read as a pipeline-wide failure when 43 of those were
+            # simply not applicable.
+            f"\nclean on collateral: {scaffolded - len(agaps)}/{scaffolded}" +
             (f"  [+{len(agaps) - len(ashown)} more, --limit 0]" if len(ashown) < len(agaps) else ""),
         ]
         if unscaffolded:
             # Not a gap. No directory means nobody ran /new-opp, which is a
             # different job from an opp whose collateral is behind.
+            ushown = unscaffolded[:a.limit] if a.limit else unscaffolded
             parts += ["",
-                      toon("noRepoDir", ["slug", "opp", "stage", "amt"], unscaffolded),
-                      "  (no directory -- run /new-opp, these are not collateral gaps)"]
+                      toon("noRepoDir", ["opp", "stage", "amt"], ushown) +
+                      (f"\n  [+{len(unscaffolded) - len(ushown)} more, --limit 0]"
+                       if len(ushown) < len(unscaffolded) else ""),
+                      "  (no directory -- run /new-opp; nothing is owed until one exists)"]
     # The citation travels with the rate. A coverage report that cannot say who
     # asked for a field is a scold, and gets ignored like one.
     shown_why = (rates if a.half in ("both", "fields") else []) + \
