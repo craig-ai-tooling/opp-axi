@@ -106,7 +106,8 @@ parsing stdout for a warning string. Nobody parses stdout for a warning string.
 opp-axi                      # overview (no args = live data)
 opp-axi opps                 # open opps
 opp-axi opp <ref>            # one opp
-opp-axi sweep                # weekly-sweep coverage
+opp-axi sweep                # weekly-sweep coverage: who is missing an SE Activity entry
+opp-axi coverage             # the rest of the SE section: what is expected by now and is empty
 opp-axi activity <ref> --add "..."   # prepend an SE Activity entry (guarded, verified)
 opp-axi field <ref> Field=value [Field=value ...]   # write SE-owned fields (guarded)
 opp-axi undo <write-id>       # restore a guarded write's prior value
