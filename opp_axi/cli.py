@@ -1510,6 +1510,32 @@ EXPECT_IF = [
      "Tech Win checked with no date"),
 ]
 
+# The repo half. Salesforce is what leadership reads; these are where the work
+# actually lives, and until 9/16/26 nothing checked them at all -- the field side
+# had `sweep` and now `coverage`, and the collateral side had a paragraph of
+# prose. Same shape as EXPECT: (path, from_stage, kind, why).
+#
+# Deliberately short. Only artifacts something already states are owed appear
+# here:
+#   OPP.md and CLAUDE.md -- required of every account directory by the data
+#     repo's own AGENTS.md, and `checks.py` already fails CI on a malformed one.
+#   docs-site/ -- from Prove Value, per docs/opp-collateral.md, and it is the
+#     artifact that writes Hands_on_Eval_POV_URL__c back to Salesforce when
+#     deploy-docs-site.sh publishes it.
+#
+# NOT here, on purpose: meeting-notes/. It is owed after a customer call, which
+# is not a stage, and gating it by stage would invent a rule nobody stated. 13
+# accounts keep one and they agree on the shape; that is a convention, not a
+# gate.
+EXPECT_ARTIFACT = [
+    ("OPP.md", None, "file",
+     "the per-account note; brief/log and every other tool assume it exists"),
+    ("CLAUDE.md", None, "file",
+     "the pointer that routes a session to `opp-axi brief` (AGENTS.md)"),
+    ("docs-site", "Prove Value", "dir",
+     "deploying it writes Hands_on_Eval_POV_URL__c back to SF"),
+]
+
 COVERAGE_FIELDS = sorted({api for api, _, _ in EXPECT} |
                          {api for api, _, _ in EXPECT_IF} |
                          {pred for _, pred, _ in EXPECT_IF})
@@ -1531,6 +1557,66 @@ def _filled(v):
     False -- so an unchecked box counts as not filled, which is the only reading
     that makes a checkbox gap visible at all."""
     return v not in (None, "", False)
+
+
+def _has_artifact(slug, path, kind):
+    """Does `slug` carry this artifact? A slug we cannot resolve to a directory
+    returns None, not False -- an opp with no repo dir has not FAILED to produce
+    collateral, nobody has scaffolded it, and reporting those as the same thing
+    would bury the real gaps under accounts that do not exist yet."""
+    if not slug or slug == "-":
+        return None
+    base = os.path.join(REPO, slug)
+    if not os.path.isdir(base):
+        return None
+    target = os.path.join(base, path)
+    return os.path.isdir(target) if kind == "dir" else os.path.isfile(target)
+
+
+def _artifact_rows(recs, i2s):
+    """(rates, gaps, unscaffolded) for the repo half."""
+    rates, gaps, unscaffolded = [], [], []
+    for path, from_stage, kind, why in EXPECT_ARTIFACT:
+        due = have = 0
+        for r in recs:
+            if not _stage_reached(r.get("StageName") or "", from_stage):
+                continue
+            got = _has_artifact(i2s.get(r["Id"][:15], "-"), path, kind)
+            if got is None:
+                continue
+            due += 1
+            have += 1 if got else 0
+        rates.append({"artifact": path, "due": due, "have": have,
+                      "pct": f"{round(100 * have / due)}%" if due else "-",
+                      "from": from_stage or "any stage", "why": why})
+
+    for r in recs:
+        slug = i2s.get(r["Id"][:15], "-")
+        stage = r.get("StageName") or ""
+        if _has_artifact(slug, "OPP.md", "file") is None:
+            unscaffolded.append({"slug": slug, "opp": (r.get("Name") or "")[:46],
+                                 "stage": stage, "amt": money(r.get("Amount"))})
+            continue
+        site = _has_artifact(slug, "docs-site", "dir")
+        url = _filled(r.get("Hands_on_Eval_POV_URL__c"))
+        miss = [path for path, from_stage, kind, _ in EXPECT_ARTIFACT
+                if _stage_reached(stage, from_stage)
+                and _has_artifact(slug, path, kind) is False
+                # A filled POV URL means the plan EXISTS, on EvalForce or in a
+                # Google Doc. Reporting a missing docs-site/ next to a URL that
+                # points at the plan reads as two problems and is none: the
+                # collateral is there, it just is not a site in this repo.
+                and not (path == "docs-site" and url)]
+        # The cross-check, and the reason the two halves share one report:
+        # a site built here that never reached Salesforce. Neither half can see
+        # it alone -- the field is empty and the directory is present.
+        if site and not url:
+            miss.append("docs-site/ built, POV URL empty")
+        if miss:
+            gaps.append({"slug": slug, "stage": stage, "amt": money(r.get("Amount")),
+                         "missing": " | ".join(miss)})
+    gaps.sort(key=lambda g: (-len(g["missing"].split("|")), -_amount(g["amt"])))
+    return rates, gaps, unscaffolded
 
 
 def cmd_coverage(a):
@@ -1576,21 +1662,51 @@ def cmd_coverage(a):
     gaps.sort(key=lambda g: (-len(g["missing"].split()), -_amount(g["amt"])))
     shown = gaps[:a.limit] if a.limit else gaps
 
+    arates, agaps, unscaffolded = _artifact_rows(recs, i2s)
+
     if a.json:
-        print(json.dumps({"se": ME, "opps": len(recs), "rates": rates,
-                          "gaps": gaps}, indent=2))
+        print(json.dumps({"se": ME, "opps": len(recs),
+                          "rates": rates, "gaps": gaps,
+                          "artifactRates": arates, "artifactGaps": agaps,
+                          "unscaffolded": unscaffolded}, indent=2))
         return
-    emit(f"coverage se={ME} opps={len(recs)}" + (f" stage={a.stage}" if a.stage else ""),
-         toon("rates", ["field", "due", "have", "pct", "from"], rates),
-         "",
-         toon("gaps", ["slug", "stage", "amt", "close", "missing"], shown),
-         f"\nclean: {len(recs) - len(gaps)}/{len(recs)}" +
-         (f"  [+{len(gaps) - len(shown)} more, --limit 0]" if len(shown) < len(gaps) else ""),
-         # The citation travels with the rate. A coverage report that cannot say
-         # who asked for a field is a scold, and gets ignored like one.
-         "\nwhy:\n" + "\n".join(f"  {r['field']}: {r['why']}" for r in rates),
-         nxt("opp-axi field <slug> <Field>=<value>", "opp-axi fields write")
-         if gaps else nxt("nothing to fill"))
+    ashown = agaps[:a.limit] if a.limit else agaps
+    parts = [f"coverage se={ME} opps={len(recs)}" + (f" stage={a.stage}" if a.stage else "")]
+
+    if a.half in ("both", "fields"):
+        parts += [
+            toon("rates", ["field", "due", "have", "pct", "from"], rates),
+            "",
+            toon("gaps", ["slug", "stage", "amt", "close", "missing"], shown),
+            f"\nclean on fields: {len(recs) - len(gaps)}/{len(recs)}" +
+            (f"  [+{len(gaps) - len(shown)} more, --limit 0]" if len(shown) < len(gaps) else ""),
+        ]
+    if a.half in ("both", "artifacts"):
+        parts += [
+            "",
+            toon("artifactRates", ["artifact", "due", "have", "pct", "from"], arates),
+            "",
+            toon("artifactGaps", ["slug", "stage", "amt", "missing"], ashown),
+            f"\nclean on collateral: {len(recs) - len(agaps) - len(unscaffolded)}/{len(recs)}" +
+            (f"  [+{len(agaps) - len(ashown)} more, --limit 0]" if len(ashown) < len(agaps) else ""),
+        ]
+        if unscaffolded:
+            # Not a gap. No directory means nobody ran /new-opp, which is a
+            # different job from an opp whose collateral is behind.
+            parts += ["",
+                      toon("noRepoDir", ["slug", "opp", "stage", "amt"], unscaffolded),
+                      "  (no directory -- run /new-opp, these are not collateral gaps)"]
+    # The citation travels with the rate. A coverage report that cannot say who
+    # asked for a field is a scold, and gets ignored like one.
+    shown_why = (rates if a.half in ("both", "fields") else []) + \
+                (arates if a.half in ("both", "artifacts") else [])
+    parts += ["\nwhy:\n" + "\n".join(
+        f"  {r.get('field') or r.get('artifact')}: {r['why']}" for r in shown_why)]
+    emit(*parts,
+         nxt("opp-axi field <slug> <Field>=<value>",
+             "automation/new-docs-site.sh <slug>",
+             "opp-axi fields write")
+         if (gaps or agaps) else nxt("nothing to fill"))
 
 
 def _amount(s):
@@ -2130,8 +2246,12 @@ def main():
     s.add_argument("--stage", help="only this StageName")
     s.add_argument("--limit", type=int, default=15,
                    help="gap rows to print; 0 for all (default: 15)")
+    s.add_argument("--fields", dest="half", action="store_const", const="fields",
+                   help="Salesforce half only")
+    s.add_argument("--artifacts", dest="half", action="store_const", const="artifacts",
+                   help="repo-collateral half only")
     s.add_argument("--json", action="store_true")
-    s.set_defaults(fn=cmd_coverage)
+    s.set_defaults(fn=cmd_coverage, half="both")
 
     s = sub.add_parser("activity", help="prepend an SE Activity entry (guarded PATCH, verified)")
     s.add_argument("ref")

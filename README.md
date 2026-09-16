@@ -107,7 +107,8 @@ opp-axi                      # overview (no args = live data)
 opp-axi opps                 # open opps
 opp-axi opp <ref>            # one opp
 opp-axi sweep                # weekly-sweep coverage: who is missing an SE Activity entry
-opp-axi coverage             # the rest of the SE section: what is expected by now and is empty
+opp-axi coverage             # what every opp owes: SE fields AND repo collateral, by stage
+opp-axi coverage --artifacts # the repo-collateral half only (--fields for the Salesforce half)
 opp-axi activity <ref> --add "..."   # prepend an SE Activity entry (guarded, verified)
 opp-axi field <ref> Field=value [Field=value ...]   # write SE-owned fields (guarded)
 opp-axi undo <write-id>       # restore a guarded write's prior value
