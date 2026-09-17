@@ -88,7 +88,12 @@ class TestVersionBump(unittest.TestCase):
         # depends on: the console's Salesforce writes card asks for `--full`, and
         # an un-reinstalled zipapp answers "unrecognized arguments" -- which the
         # card renders as unavailable. `make install` HERE before the console ships.
-        self.assertEqual(__version__, "0.1.18")
+        # 0.1.19 routes `sf data query` through the lm-42 tool gateway when
+        # LAWNMOWER_GATEWAY is set, and the same rule applies once more: the env
+        # var does nothing on this box until the zipapp is rebuilt, so a caller
+        # that sets it would keep using the local `sf` credential and read that
+        # as the gateway working.
+        self.assertEqual(__version__, "0.1.19")
 
 
 class TestStateDir(StateDirCase):
