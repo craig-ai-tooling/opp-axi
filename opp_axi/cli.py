@@ -30,7 +30,7 @@ import subprocess
 import sys
 from datetime import datetime, timedelta
 
-from opp_axi import __version__, csfolder, guard, oppmd, rep
+from opp_axi import __version__, csfolder, gateway, guard, oppmd, rep
 
 # Packaged as a zipapp, __file__ is inside the archive, so the old
 # dirname(dirname(realpath(__file__))) trick cannot find the opp repo any more.
@@ -198,6 +198,21 @@ def _parse_json(s, what="output"):
 
 
 def sf_query(soql, timeout=180):
+    """One SOQL SELECT, through the lm-42 tool gateway if one is configured.
+
+    LAWNMOWER_GATEWAY unset is the local `sf` CLI, exactly as before -- that is
+    what lets verbs move one at a time with nothing breaking. Set, the gateway
+    is used and a gateway failure DIES; it does not quietly fall back to the
+    local CLI, because a silent fallback means the gateway can be broken for a
+    week while every call keeps using the credential that was supposed to have
+    moved, and nothing says so.
+    """
+    if gateway.endpoint():
+        try:
+            return gateway.sf_query(soql, timeout)
+        except gateway.GatewayError as exc:
+            die(str(exc))
+
     p = _run(["sf", "data", "query", "-q", soql, "-o", ORG, "--json"], timeout)
     d = _parse_json(p.stdout or p.stderr, "sf query")
     if p.returncode != 0 or d.get("status") not in (0, None):

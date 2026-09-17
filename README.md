@@ -88,6 +88,29 @@ there are five should say so.
 | `OPP_CS_DRIVE` | `Customer Success` | shared drive `folder` searches |
 | `OPP_CS_CUSTOMERS` | `Customers` | folder within that drive holding one dir per customer |
 | `OPP_AXI_STATE` | `$XDG_STATE_HOME/opp-axi` or `~/.local/state/opp-axi` | write locks + audit log (`writes.jsonl`) |
+| `LAWNMOWER_GATEWAY` | unset | base URL of the lm-42 tool gateway. **Unset is the local `sf` CLI, exactly as before.** Set, `sf data query` goes over HTTP and a gateway failure is a refusal, not a quiet retry against `sf` |
+| `LAWNMOWER_GATEWAY_TOKEN` | unset | bearer token; falls back to `LAWNMOWER_GATEWAY_TOKEN_FILE` |
+| `LAWNMOWER_GATEWAY_TOKEN_FILE` | `~/.config/lawnmower/tool-gateway-token` | where the token is read from when the env var is unset |
+
+### The tool gateway (lm-42)
+
+`LAWNMOWER_GATEWAY` moves `sf data query` off the local CLI and onto a service that
+holds the credential, so a pod does not need Craig's Salesforce login on disk. Unset
+changes nothing, which is what lets verbs move one at a time.
+
+```sh
+opp-axi opps                                          # local sf, as always
+LAWNMOWER_GATEWAY=http://tool-gateway.lawnmower.svc opp-axi opps
+```
+
+Verified 9/17/26: byte-identical output both ways (45 opps, 5,476 bytes), 3.0s local
+against 3.7s through the gateway.
+
+**A gateway failure is a failure.** It does not fall back to `sf` per call. A silent
+fallback means the gateway can be broken for a week while every call quietly uses the
+credential that was supposed to have moved, and nothing says so. The error names the
+gateway, so a dead service does not read as "sf query failed" and send you to the wrong
+machine.
 
 ## Exit codes
 
