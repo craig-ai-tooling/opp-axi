@@ -105,3 +105,76 @@ class ArtifactSignalIsUngated(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class ArtifactFindingStopsOnceItIsLogged(unittest.TestCase):
+    """The signal answers "a customer file is here", which stays true for the whole
+    --since window. Nothing answered "and we have dealt with it".
+
+    Measured 9/16/26 on toyota: the artifact was reviewed and logged at 19:52Z
+    (customer-opportunities#75), and `customer-artifact-awaiting-review` was filed
+    four more times over the next five hours, routing a session each time. The
+    window is seven days and triage runs every thirty minutes, so left alone that
+    one docx was good for roughly 336 filings.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self._repo = cli.REPO
+        cli.REPO = self.tmp.name
+        self.addCleanup(lambda: setattr(cli, "REPO", self._repo))
+        self.slug = "acme"
+        os.makedirs(os.path.join(self.tmp.name, self.slug, cli.MAIL_INBOX))
+
+    def _note(self, body):
+        with open(os.path.join(self.tmp.name, self.slug, "OPP.md"), "w") as f:
+            f.write(body)
+
+    def test_an_unlogged_artifact_still_fires(self):
+        self._note("# acme\n\n## Log\n- 2026-09-15: kickoff call.\n")
+        self.assertEqual(
+            ["mail-inbox/2026-09-16-RVTools_export.zip"],
+            cli.unreviewed_artifacts(self.slug, ["mail-inbox/2026-09-16-RVTools_export.zip"]),
+        )
+
+    def test_an_artifact_named_in_the_log_is_done(self):
+        self._note(
+            "# acme\n\n## Log\n- 2026-09-16: **RVTools export mailed in.** Consolidation run; "
+            "raw file at `acme/mail-inbox/2026-09-16-RVTools_export.zip`, gitignored.\n"
+        )
+        self.assertEqual(
+            [], cli.unreviewed_artifacts(self.slug, ["mail-inbox/2026-09-16-RVTools_export.zip"])
+        )
+
+    def test_a_second_artifact_fires_while_the_first_stays_done(self):
+        """Per file, not per opp. The same customer sending a second export is new work."""
+        self._note("- 2026-09-16: logged `acme/mail-inbox/2026-09-16-RVTools_export.zip`.\n")
+        self.assertEqual(
+            ["mail-inbox/2026-09-17-support_bundle.tgz"],
+            cli.unreviewed_artifacts(
+                self.slug,
+                ["mail-inbox/2026-09-16-RVTools_export.zip",
+                 "mail-inbox/2026-09-17-support_bundle.tgz"],
+            ),
+        )
+
+    def test_a_word_like_artifact_in_the_note_does_not_mark_it_done(self):
+        """The done-check matches the filename, never a word.
+
+        patterns.yaml's own done_when is `matches: [artifact, validated, ...]`.
+        toyota/OPP.md carries "artifact" 12 times and "validated" 9 times from
+        unrelated entries, so that check reads as handled before anything arrives.
+        """
+        self._note("- 2026-09-01: validated the profile. Left an artifact in the repo.\n")
+        self.assertEqual(
+            ["mail-inbox/2026-09-16-RVTools_export.zip"],
+            cli.unreviewed_artifacts(self.slug, ["mail-inbox/2026-09-16-RVTools_export.zip"]),
+        )
+
+    def test_no_opp_note_means_unreviewed_not_handled(self):
+        """A customer is blocked on us, so an unreadable note fires. It never mutes."""
+        self.assertEqual(
+            ["mail-inbox/2026-09-16-RVTools_export.zip"],
+            cli.unreviewed_artifacts(self.slug, ["mail-inbox/2026-09-16-RVTools_export.zip"]),
+        )

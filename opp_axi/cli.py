@@ -1441,6 +1441,37 @@ def repo_touched_since(slug, since, subdir=None):
     return out
 
 
+def unreviewed_artifacts(slug, arrived):
+    """Of the customer files that arrived, the ones `<slug>/OPP.md` does not name.
+
+    `repo_touched_since` answers "a customer file is here", which stays true for
+    the whole `--since` window. Nothing answered "and we have already dealt with
+    it", so the finding re-fired every run until the file aged out. Measured
+    9/16/26 on toyota: the artifact was reviewed and logged at 19:52Z in
+    customer-opportunities#75, and the same finding was filed four more times over
+    the following five hours, routing a session each time.
+
+    The evidence is the log entry the work itself produces. patterns.yaml's `work`
+    tells the session to record the artifact with `opp-axi log <slug>` and to name
+    its path; #75 wrote
+    `toyota/mail-inbox/2026-09-16-Claude_Custom_LLM_Instructions.docx` into the
+    entry, which is what this reads back. Matching on the basename, not on a word
+    like "artifact" or "validated": those appear a dozen times in a long-lived
+    OPP.md for unrelated reasons, and a done-check that broad would have marked
+    every opp handled before anything arrived.
+
+    Default-deny runs toward FIRING here, which is the opposite of the rest of
+    this file and is deliberate: a customer is blocked on us, so an OPP.md that
+    cannot be read means unreviewed, never handled.
+    """
+    try:
+        with open(os.path.join(REPO, slug, "OPP.md"), encoding="utf-8", errors="replace") as fh:
+            note = fh.read()
+    except OSError:
+        return list(arrived)
+    return [p for p in arrived if os.path.basename(p) not in note]
+
+
 # ── coverage: which SE-owned fields are expected by now, and are not filled ───
 #
 # The gap this closes: `sweep` answers "did every opp get an SE Activity entry",
@@ -1797,7 +1828,11 @@ def cmd_triage(a):
         # loop/mail-probe.py saves here came from the customer's own mail, so the
         # pattern's name is true of it. Costs one os.walk of one subdirectory.
         if slug:
-            arrived = repo_touched_since(slug, since, subdir=MAIL_INBOX)
+            # Only the ones OPP.md does not already name. Without this the finding
+            # re-fires every run for the whole --since window -- 4 filings in 5
+            # hours on toyota 9/16/26, all of them after the artifact had been
+            # reviewed and logged.
+            arrived = unreviewed_artifacts(slug, repo_touched_since(slug, since, subdir=MAIL_INBOX))
             if arrived:
                 add("customer-artifact-awaiting-review", slug,
                     f"{len(arrived)} file(s) emailed in by the customer since {since}",

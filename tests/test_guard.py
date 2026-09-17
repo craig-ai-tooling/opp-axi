@@ -74,13 +74,15 @@ class StateDirCase(unittest.TestCase):
 
 
 class TestVersionBump(unittest.TestCase):
-    def test_version_is_0_1_15(self):
+    def test_version_is_0_1_16(self):
         # This test exists so a version bump is a decision rather than a side effect.
         # 0.1.11 was the multipicklist set-comparison fix (#15). Ungating the
         # customer-artifact signal needs its own bump, because the box runs a BUILT
         # zipapp at ~/.local/bin/opp-axi -- merging alone changes nothing there until
-        # `make install` copies a new one over: 0.1.15.
-        self.assertEqual(__version__, "0.1.15")
+        # `make install` copies a new one over: 0.1.15. Giving that signal the
+        # done-check it never had is 0.1.16, and the same `make install` applies:
+        # until the zipapp is replaced, triage keeps re-filing a reviewed artifact.
+        self.assertEqual(__version__, "0.1.16")
 
 
 class TestStateDir(StateDirCase):
