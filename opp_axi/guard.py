@@ -350,6 +350,28 @@ def _resolve_field(ref):
     cli.die(f"unknown field '{ref}' — see opp-axi fields write", cli.E_USAGE)
 
 
+def field_label(ref):
+    """API name (or label) -> the friendly label a human reads. Unknown -> itself.
+
+    `_resolve_field()` already walks these rows label-first to answer "what do I
+    PATCH"; this walks the same rows to answer "what do I call it on screen".
+    Every table, not just `write`: the audit log is history, and a field that has
+    since moved to `never`/`dead`/`rep` still has a write recorded under it.
+
+    Callers that RENDER a write -- the console's Salesforce writes card is the
+    one today -- must ask for this rather than keep their own table. A second
+    copy drifts silently the first time a field is added here, and the drift
+    shows up as a raw `Hands_on_Eval_POV_URL__c` on Craig's board.
+    """
+    ref_l = (ref or "").strip().lower()
+    for table in ("write", "never", "dead", "rep"):
+        for row in cli.FIELDS.get(table, ()):
+            label, api = row[0], row[1]
+            if ref_l in (label.lower(), api.lower()):
+                return label
+    return ref or ""
+
+
 def _validate(api, kind, raw):
     """Coerce + validate a CLI string for `api` per its declared type. Anything that
     fails is a usage error (E_USAGE) — the guard exists to stop a bad VALUE, not to
@@ -462,6 +484,13 @@ def _parse_mdy(s):
 
 
 def cmd_writes(a):
+    # --full carries whole field values -- an SE Activity entry measured 2,335
+    # characters, newlines and all. TOON is a table; a cell like that does not
+    # survive it. Refusing beats quietly first_line()-ing the value, which is
+    # the exact truncation --full exists to undo.
+    if getattr(a, "full", False) and not getattr(a, "json", False):
+        cli.die("writes --full returns whole multi-line field values, which TOON "
+                "cannot hold — use: opp-axi writes --full --json", cli.E_USAGE)
     latest = list(_latest_by_id(_load_writes()).values())
     if a.since:
         cutoff = _parse_mdy(a.since)   # naive, local calendar date at 00:00
@@ -471,9 +500,19 @@ def cmd_writes(a):
     if a.opp:
         latest = [r for r in latest if r.get("slug") == a.opp]
     latest.sort(key=lambda r: r.get("id", ""))
-    rows = [{"id": r.get("id"), "at": r.get("at"), "slug": r.get("slug"),
-             "field": r.get("field"), "new": cli.first_line(r.get("new") or ""),
-             "status": r.get("status")} for r in latest]
+    if getattr(a, "full", False):
+        # Everything a caller needs to SHOW the write rather than list it: the
+        # friendly label, the whole new value, and the `old` the ledger has been
+        # recording since the guard's first line (guarded_patch stamps both).
+        # "The full update" is a diff question and the answer was already on disk.
+        rows = [{"id": r.get("id"), "at": r.get("at"), "slug": r.get("slug"),
+                 "field": r.get("field"), "label": field_label(r.get("field")),
+                 "old": r.get("old"), "new": r.get("new"),
+                 "status": r.get("status")} for r in latest]
+    else:
+        rows = [{"id": r.get("id"), "at": r.get("at"), "slug": r.get("slug"),
+                 "field": r.get("field"), "new": cli.first_line(r.get("new") or ""),
+                 "status": r.get("status")} for r in latest]
 
     if getattr(a, "json", False):
         print(json.dumps(rows, indent=2))

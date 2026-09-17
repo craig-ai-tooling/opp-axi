@@ -116,6 +116,7 @@ opp-axi activity <ref> --add "..."   # prepend an SE Activity entry (guarded, ve
 opp-axi field <ref> Field=value [Field=value ...]   # write SE-owned fields (guarded)
 opp-axi undo <write-id>       # restore a guarded write's prior value
 opp-axi writes                # audit log of guarded writes
+opp-axi writes --full --json  # + friendly label and the whole old/new values
 opp-axi cal --date today
 opp-axi mail 'subject:X newer_than:2d'
 opp-axi evidence <ref>       # cal + zoom + mail + repo + wispr
@@ -165,6 +166,13 @@ written BEFORE the PATCH and confirmed after, so a crash mid-write still leaves 
 `pending` record rather than nothing. `opp-axi writes` lists that log; `opp-axi undo
 <id>` reverts one entry, but only if the field still holds exactly what that write
 put there.
+
+`writes --full --json` returns the same rows with the field's friendly label (the
+one in `cli.FIELDS`, e.g. `Sales_Engineer_Overview__c` -> "SE Activity"), the WHOLE
+`new` value rather than its first line, and the `old` the ledger recorded. That is
+what a caller needs to render a write instead of list one, and it is emitted from
+here so nothing downstream keeps a second copy of the label table. `--full` without
+`--json` is refused: TOON is a table and these values are multi-line.
 
 `field` is deliberately not called `set` — a global shell guard on this box blocks
 the bare word `set` as a command.

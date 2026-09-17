@@ -2487,6 +2487,8 @@ def main():
     s.add_argument("--since", help="M/D/YY")
     s.add_argument("--opp", help="filter by slug")
     s.add_argument("--json", action="store_true")
+    s.add_argument("--full", action="store_true",
+                   help="friendly label + the WHOLE old and new values (needs --json)")
     s.set_defaults(fn=guard.cmd_writes)
 
     s = sub.add_parser("cal", help="calendar, normalized + opp-matched")
