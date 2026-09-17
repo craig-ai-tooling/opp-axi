@@ -74,7 +74,7 @@ class StateDirCase(unittest.TestCase):
 
 
 class TestVersionBump(unittest.TestCase):
-    def test_version_is_0_1_17(self):
+    def test_version_is_0_1_18(self):
         # This test exists so a version bump is a decision rather than a side effect.
         # 0.1.11 was the multipicklist set-comparison fix (#15). Ungating the
         # customer-artifact signal needs its own bump, because the box runs a BUILT
@@ -84,7 +84,11 @@ class TestVersionBump(unittest.TestCase):
         # until the zipapp is replaced, triage keeps re-filing a reviewed artifact.
         # 0.1.17 adds the `folder` verb, and the same rule applies hardest here:
         # the verb does not exist at all on this box until the zipapp is rebuilt.
-        self.assertEqual(__version__, "0.1.17")
+        # 0.1.18 adds `writes --full`, and it is the first bump another program
+        # depends on: the console's Salesforce writes card asks for `--full`, and
+        # an un-reinstalled zipapp answers "unrecognized arguments" -- which the
+        # card renders as unavailable. `make install` HERE before the console ships.
+        self.assertEqual(__version__, "0.1.18")
 
 
 class TestStateDir(StateDirCase):
@@ -740,6 +744,106 @@ class TestCmdWrites(StateDirCase):
             else:
                 os.environ["TZ"] = old_tz
             time.tzset()
+
+
+# A real SE Activity entry: a dated first line and a body under it. The console's
+# card used to render the whole first line and nothing else; the modal needs both
+# halves, so every assertion below is about what survives the round trip.
+LONG_NEW = ("9/16/26 CS: onsite recap logged.\n"
+            "Walked the platform team through Palette edge. Two blockers remain:\n"
+            "  - no OCI registry for their own packs\n"
+            "  - MetalLB pool overlaps the mgmt VLAN")
+
+
+class TestCmdWritesFull(StateDirCase):
+    """`writes --full` — what the console needs to SHOW a write, not just list it.
+
+    Craig, 9/16/26: "Would be nice to have the friendly field name rather than the
+    programmatic one." The friendly name lives in `cli.FIELDS`, in this repo, and
+    it has to be emitted from here — a copy of that table on the console side
+    drifts the first time a field is added.
+    """
+
+    def _one_write(self, new=LONG_NEW, old="OLD BODY",
+                   field="Sales_Engineer_Overview__c"):
+        record = {field: old}
+        fake_query, fake_patch = _fake_sf(record)
+        with mock.patch.object(cli, "sf_query", side_effect=fake_query), \
+             mock.patch.object(guard, "sf_patch", side_effect=fake_patch):
+            return guard.guarded_patch(OID, "acme", field, new, old, reason="test")
+
+    def _rows(self, **kw):
+        ns = dict(since=None, opp=None, json=True, full=True)
+        ns.update(kw)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            guard.cmd_writes(argparse.Namespace(**ns))
+        return json.loads(buf.getvalue())
+
+    def test_full_returns_the_whole_new_value_not_its_first_line(self):
+        self._one_write()
+        rows = self._rows()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["new"], LONG_NEW)
+        self.assertIn("MetalLB pool overlaps", rows[0]["new"],
+                      "--full truncated the value it exists to return in full")
+
+    def test_full_returns_the_old_value_the_ledger_already_recorded(self):
+        self._one_write()
+        self.assertEqual(self._rows()[0]["old"], "OLD BODY")
+
+    def test_full_returns_the_friendly_label_from_the_fields_table(self):
+        self._one_write()
+        row = self._rows()[0]
+        self.assertEqual(row["label"], "SE Activity")
+        self.assertEqual(row["field"], "Sales_Engineer_Overview__c",
+                         "the API name still has to be there — undo and the audit "
+                         "log are keyed on it")
+
+    def test_every_writable_field_resolves_to_its_own_label(self):
+        """The contract, not one example: field_label() is the console's ONLY
+        source for a friendly name, so every row of the table must answer, and
+        answer with the label rather than the API name it was asked with."""
+        for label, api, _kind, _values in cli.FIELDS["write"]:
+            self.assertEqual(guard.field_label(api), label, api)
+            self.assertEqual(guard.field_label(label), label, label)
+
+    def test_a_field_no_longer_in_the_write_table_still_gets_a_label(self):
+        """The audit log is history. A field that has since moved to never/dead/rep
+        still has writes recorded under it, and those rows must not fall back to
+        the raw API name while a label exists."""
+        label, api, _why = cli.FIELDS["never"][0]
+        self.assertEqual(guard.field_label(api), label)
+
+    def test_an_unknown_field_falls_back_to_itself(self):
+        self.assertEqual(guard.field_label("Not_A_Field__c"), "Not_A_Field__c")
+        self.assertEqual(guard.field_label(None), "")
+
+    def test_full_without_json_is_refused_not_silently_truncated(self):
+        """TOON is a table and LONG_NEW does not fit in a cell. first_line()-ing it
+        anyway would hand back a truncated value under the name `--full`."""
+        self._one_write()
+        buf, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(err):
+            with self.assertRaises(SystemExit) as cm:
+                guard.cmd_writes(argparse.Namespace(since=None, opp=None,
+                                                    json=False, full=True))
+        self.assertEqual(cm.exception.code, cli.E_USAGE)
+        self.assertIn("--json", err.getvalue() + buf.getvalue())
+
+    def test_without_full_the_shape_is_unchanged(self):
+        """Anything already reading `writes --json` keeps the rows it had: first
+        line only, no `old`, no `label`."""
+        self._one_write()
+        row = self._rows(full=False)[0]
+        self.assertEqual(row["new"], "9/16/26 CS: onsite recap logged.")
+        self.assertNotIn("old", row)
+        self.assertNotIn("label", row)
+
+    def test_full_honours_since_and_opp_the_same_way(self):
+        self._one_write()
+        self.assertEqual(self._rows(opp="acme")[0]["slug"], "acme")
+        self.assertEqual(self._rows(opp="nobody"), [])
 
 
 if __name__ == "__main__":
