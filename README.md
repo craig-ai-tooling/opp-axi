@@ -42,7 +42,7 @@ the doctor says it.
 | connector | need | what it gives you | how to satisfy it |
 |---|---|---|---|
 | `salesforce` | **required** | opportunities, SE Activity, account data | `sf org login web --alias spectrocloud` |
-| `google` | **required** | calendar and gmail evidence | `gws` (or `gog`) on PATH; `source ~/.profile` |
+| `google` | **required** | calendar, gmail and Drive evidence | `gws` (or `gog`) on PATH; `source ~/.profile` |
 | `opp-repo` | **required** | local opp folders and `.salesforce.json` | clone the opp repo, set `OPP_REPO` |
 | `wispr` | optional | meeting transcripts for `evidence` / `triage` | `/wispr-sync` in a Claude session, or `OPP_WISPR=off` |
 | `patterns` | optional | `triage` rules | `pip install pyyaml`, set `OPP_PATTERNS` |
@@ -84,6 +84,9 @@ there are five should say so.
 | `OPP_WISPR` | `on` | `off` declares Wispr out of scope |
 | `OPP_WISPR_DIR` | `~/.cache/opp-axi/wispr` | meeting cache (outside the repo: verbatim customer speech) |
 | `OPP_PATTERNS` | `~/code/ai-lawnmower/patterns/patterns.yaml` | `triage` rules |
+| `OPP_CS_FOLDER` | resolved by name at runtime | `Customers` folder id, to skip the name lookup |
+| `OPP_CS_DRIVE` | `Customer Success` | shared drive `folder` searches |
+| `OPP_CS_CUSTOMERS` | `Customers` | folder within that drive holding one dir per customer |
 | `OPP_AXI_STATE` | `$XDG_STATE_HOME/opp-axi` or `~/.local/state/opp-axi` | write locks + audit log (`writes.jsonl`) |
 
 ## Exit codes
@@ -118,6 +121,9 @@ opp-axi mail 'subject:X newer_than:2d'
 opp-axi evidence <ref>       # cal + zoom + mail + repo + wispr
 opp-axi wispr                # cached meetings, matched to opps
 opp-axi triage               # signal -> pattern -> proposed work
+opp-axi folder <ref>         # CS customer-folder state: is it there, what is missing from it
+opp-axi folder --all         # the same sweep across every open opp
+opp-axi folder <ref> --populate      # copy in only the artifacts that are not there yet
 opp-axi rep                  # what reps wrote across your open opps (read-only)
 opp-axi rep <ref>            # rep/AE-entered data on one opp: next steps, MEDDPICC, calls, notes, history
 opp-axi fields               # SE field reference
@@ -126,6 +132,28 @@ opp-axi doctor               # what is configured, what is not
 opp-axi brief <ref>          # a budgeted slice of OPP.md, not the whole file
 opp-axi log <ref> "text"     # append a dated Log entry without reading the file
 ```
+
+## Customer folders
+
+`folder` answers one question: does this opp have a folder in the Customer Success
+shared drive yet, and if it does, which of the required artifacts are missing from
+it. SEs are readers on that drive, so the folder is created by a Content Manager or
+a drive Manager, often well after the opp needs one. A missing folder is therefore
+an ordinary reported state rather than an error, and the check is safe to re-run
+until it appears.
+
+Three artifact states, and they mean different things:
+
+| state | meaning |
+| --- | --- |
+| `present` | already in the customer folder, nothing to do |
+| `copyable` | exists elsewhere in Drive; `--populate` copies it in |
+| `absent` | does not exist anywhere — somebody has to write it |
+
+A folder that could be one of two accounts reports `AMBIGUOUS`, never `MISSING`.
+Those are different facts, and guessing files one customer's plan into another
+customer's folder. `--populate` refuses on a folder this account cannot write to
+instead of failing mid-copy.
 
 ## Writing
 

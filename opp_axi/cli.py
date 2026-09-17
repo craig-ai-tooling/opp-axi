@@ -30,7 +30,7 @@ import subprocess
 import sys
 from datetime import datetime, timedelta
 
-from opp_axi import __version__, guard, oppmd, rep
+from opp_axi import __version__, csfolder, guard, oppmd, rep
 
 # Packaged as a zipapp, __file__ is inside the archive, so the old
 # dirname(dirname(realpath(__file__))) trick cannot find the opp repo any more.
@@ -871,6 +871,103 @@ def cmd_scaffold(a):
          nxt("python3 automation/gen-pipeline.py", "opp-axi")
          if (made or updated) and not a.dry_run
          else nxt("re-run without --dry-run"))
+
+
+# ── customer folder in the Customer Success shared drive ───────────────────
+def _gws_json(args, params, body=None):
+    """One Google CLI verb -> parsed JSON. csfolder calls this; tests fake it."""
+    g = gcli()
+    if g != "gws":
+        die("this needs the gws CLI — gog has no Drive verbs", E_REFUSED)
+    cmd = [g] + list(args) + ["--params", json.dumps(params)]
+    if body is not None:
+        cmd += ["--json", json.dumps(body)]
+    d = _parse_json(_run(cmd).stdout, " ".join(args))
+    if isinstance(d, dict) and d.get("error"):
+        die(f"drive: {(d['error'] or {}).get('message', '')[:200]}")
+    return d
+
+
+def _acct_of(rec):
+    return (rec.get("Account") or {}).get("Name") or re.split(r"\s+-\s+", rec.get("Name") or "")[0]
+
+
+def cmd_folder(a):
+    """Is there a customer folder for this opp yet, and what is missing from it.
+
+    SEs are readers on the Customer Success drive, so the folder usually appears
+    only after someone else makes it. A missing folder is reported as an ordinary
+    state, never an error, so this is safe to re-run until it shows up — then
+    --populate copies in just the artifacts that are not there yet.
+    """
+    if not a.all and not a.ref:
+        die("give an opp ref, or --all", E_USAGE)
+    if a.all and a.ref:
+        die("--all takes no ref", E_USAGE)
+    gws, idx = _gws_json, opp_index()
+    try:
+        customers = csfolder.resolve_customers(gws)
+    except csfolder.DriveLayoutError as e:
+        die(str(e), E_REFUSED)
+    cols = "Id,Name,Account.Name,Hands_on_Eval_POV_URL__c"
+    if a.all:
+        recs = sf_query(f"SELECT {cols} FROM Opportunity WHERE {OPEN_WHERE} ORDER BY Amount DESC")
+    else:
+        _, oid = resolve(a.ref, idx)
+        recs = sf_query(f"SELECT {cols} FROM Opportunity WHERE Id = '{oid}'")
+    if not recs:
+        die("no matching opportunity in Salesforce", E_NOTFOUND)
+
+    kids = csfolder.ls(gws, customers)
+    rows, actions, gaps = [], [], 0
+    for rec in recs:
+        acct = _acct_of(rec)
+        match, folder = csfolder.folder_match(gws, acct, customers, children=kids)
+        if not folder:
+            gaps += 1
+            rows.append({"acct": acct[:30],
+                         "folder": "MISSING" if match == "none" else "AMBIGUOUS",
+                         csfolder.VALIDATION_PLAN: "-", csfolder.SUCCESS_PLAN: "-"})
+            if match == "ambiguous":
+                actions.append({"acct": acct[:22], "kind": "folder", "do": "pick one",
+                                "what": "two folders could be this account"})
+            continue
+        meta = csfolder.get(gws, folder["id"])
+        contents = csfolder.ls(gws, folder["id"])
+        state = csfolder.required_state(gws, acct, rec.get("Hands_on_Eval_POV_URL__c"),
+                                        folder, contents=contents)
+        row = {"acct": acct[:30], "folder": folder["name"][:24]}
+        for s in state:
+            row[s["kind"]] = s["state"]
+            if s["state"] == "present":
+                continue
+            gaps += 1
+            if s["state"] == "absent":
+                actions.append({"acct": acct[:22], "kind": s["kind"],
+                                "do": "write it", "what": s["name"][:46]})
+                continue
+            if not a.populate:
+                actions.append({"acct": acct[:22], "kind": s["kind"],
+                                "do": "copy in", "what": s["name"][:46]})
+            elif not csfolder.can_write(gws, folder["id"], meta=meta):
+                actions.append({"acct": acct[:22], "kind": s["kind"],
+                                "do": "REFUSED", "what": "read-only on this folder"})
+            else:
+                new = csfolder.copy_into(gws, s["id"], folder["id"])
+                actions.append({"acct": acct[:22], "kind": s["kind"],
+                                "do": "copied", "what": new.get("id", "")[:46]})
+        rows.append(row)
+
+    unresolved = sum(1 for x in actions if x["do"] in ("write it", "REFUSED", "copy in"))
+    unresolved += sum(1 for r in rows if r["folder"] in ("MISSING", "AMBIGUOUS"))
+    emit(f"folder{' (populate)' if a.populate else ''} customers={customers}",
+         toon("opps", ["acct", "folder", csfolder.VALIDATION_PLAN, csfolder.SUCCESS_PLAN], rows),
+         toon("actions", ["acct", "kind", "do", "what"], actions),
+         f"\nopps:{len(rows)} gaps:{gaps} unresolved:{unresolved}",
+         nxt("opp-axi folder <ref> --populate") if gaps and not a.populate
+         else nxt("opp-axi folder --all"))
+    if unresolved:
+        sys.exit(E_PARTIAL)
 
 
 FREEMAIL = {"gmail.com", "yahoo.com", "hotmail.com", "outlook.com", "icloud.com", "aol.com"}
@@ -2196,7 +2293,7 @@ def _probe_dispatch():
 
 CONNECTORS = [
     ("salesforce", "required", "opportunities, SE Activity, account data",   _probe_sf),
-    ("google",     "required", "calendar and gmail evidence",                _probe_google),
+    ("google",     "required", "calendar, gmail and Drive evidence",          _probe_google),
     ("opp-repo",   "required", "the local opp folders and .salesforce.json", _probe_repo),
     ("wispr",      "optional", "meeting transcripts for evidence/triage",    _probe_wispr),
     ("patterns",   "optional", "triage rules (patterns.yaml + pyyaml)",      _probe_patterns),
@@ -2350,6 +2447,13 @@ def main():
     s = sub.add_parser("scaffold", help="create repo dirs for open opps that have none")
     s.add_argument("--dry-run", action="store_true")
     s.set_defaults(fn=cmd_scaffold)
+
+    s = sub.add_parser("folder", help="CS customer-folder state; fill only what is missing")
+    s.add_argument("ref", nargs="?", help="slug | SF id | substring (omit with --all)")
+    s.add_argument("--all", action="store_true", help="every open opp")
+    s.add_argument("--populate", action="store_true",
+                   help="copy in the artifacts that exist elsewhere but are not in the folder")
+    s.set_defaults(fn=cmd_folder)
 
     s = sub.add_parser("wispr", help="cached Wispr meetings, matched to opps")
     s.add_argument("--since", help="YYYY-MM-DD")
