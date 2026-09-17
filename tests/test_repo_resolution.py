@@ -21,6 +21,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import date, datetime, timedelta
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
@@ -210,6 +211,87 @@ class DoctorReportsTheResolvedRoot(unittest.TestCase):
         repo_row = next(c for c in out["config"] if c["var"] == "OPP_REPO")
         self.assertEqual(repo_row["value"], fake_repo)
         self.assertEqual(repo_row["source"], "OPP_REPO env var")
+
+
+class RepoTouchedSinceIgnoresWorktreeCheckoutMtime(unittest.TestCase):
+    """`cli.repo_touched_since()` must not fire for a tracked file just
+    because `git worktree add` stamped it with today's mtime. Every
+    dispatched triage session runs inside a fresh worktree of its own, so
+    this is the exact environment the pattern has to be right in (9/16/26):
+    a worktree carrying files last committed months ago read as customer
+    activity today, and a full run would have flagged every opp with any
+    files at all.
+
+    Real disposable git repos and a real `git worktree add`, same pattern as
+    CwdDetection above -- the whole point is that mtime lies specifically
+    because of what a REAL checkout does to it."""
+
+    def setUp(self):
+        self._repo = cli.REPO
+        self.addCleanup(lambda: setattr(cli, "REPO", self._repo))
+
+    def test_a_tracked_file_committed_long_ago_does_not_fire_from_a_fresh_worktree(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            origin = os.path.join(tmp, "origin")
+            os.makedirs(os.path.join(origin, "acme", "mail-inbox"))
+            with open(os.path.join(origin, "acme", "mail-inbox", "old_export.zip"), "w") as fh:
+                fh.write("old customer file")
+            _git(origin, "init", "-q", "-b", "main")
+            _git(origin, "add", "acme/mail-inbox/old_export.zip")
+            env = dict(os.environ)
+            env.update(GIT_ENV)
+            env["GIT_AUTHOR_DATE"] = env["GIT_COMMITTER_DATE"] = "2026-05-04T10:00:00"
+            subprocess.run(["git", "-C", origin, "commit", "-q", "-m", "old customer artifact"],
+                          env=env, check=True)
+
+            worktree = os.path.join(tmp, "wt")
+            _git(origin, "worktree", "add", "-q", "-b", "session-branch", worktree, "main")
+
+            # Confirm the fixture actually reproduces the bug's precondition
+            # before trusting the assertion below: a fresh worktree stamps
+            # the tracked file with today, not 5/4/26.
+            stamped = datetime.fromtimestamp(os.path.getmtime(
+                os.path.join(worktree, "acme", "mail-inbox", "old_export.zip"))).date()
+            self.assertEqual(stamped, date.today(),
+                            "fixture did not reproduce checkout-stamped mtime")
+
+            cli.REPO = worktree
+            since = date.today() - timedelta(days=3)
+            touched = cli.repo_touched_since("acme", since, subdir=cli.MAIL_INBOX)
+            self.assertEqual([], touched,
+                            "a file last committed 5/4/26 must not read as touched just "
+                            "because the worktree checked it out today")
+
+    def test_an_untracked_file_dropped_into_the_worktree_still_fires(self):
+        """The pattern exists to catch exactly this: a customer artifact with
+        no git history at all. It must keep firing off mtime."""
+        with tempfile.TemporaryDirectory() as tmp:
+            origin = os.path.join(tmp, "origin")
+            os.makedirs(os.path.join(origin, "acme", "mail-inbox"))
+            with open(os.path.join(origin, "acme", ".keep"), "w") as fh:
+                fh.write("")
+            _git(origin, "init", "-q", "-b", "main")
+            _git(origin, "add", "acme/.keep")
+            _git(origin, "commit", "-q", "-m", "seed")
+
+            worktree = os.path.join(tmp, "wt")
+            _git(origin, "worktree", "add", "-q", "-b", "session-branch", worktree, "main")
+
+            # git does not track the empty mail-inbox dir, so the worktree
+            # checkout never created it -- make it ourselves, same as a real
+            # mail-drop would.
+            os.makedirs(os.path.join(worktree, "acme", "mail-inbox"), exist_ok=True)
+            artifact = os.path.join(worktree, "acme", "mail-inbox",
+                                    "2026-09-16-RVTools_export.zip")
+            with open(artifact, "w") as fh:
+                fh.write("new customer file, never committed")
+
+            cli.REPO = worktree
+            since = date.today() - timedelta(days=3)
+            touched = cli.repo_touched_since("acme", since, subdir=cli.MAIL_INBOX)
+            self.assertEqual(["mail-inbox/2026-09-16-RVTools_export.zip"], touched,
+                            "an untracked artifact has no commit history -- mtime is "
+                            "the only signal that exists for it")
 
 
 if __name__ == "__main__":
