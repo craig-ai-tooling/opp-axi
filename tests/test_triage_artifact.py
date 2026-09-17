@@ -178,3 +178,50 @@ class ArtifactFindingStopsOnceItIsLogged(unittest.TestCase):
             ["mail-inbox/2026-09-16-RVTools_export.zip"],
             cli.unreviewed_artifacts(self.slug, ["mail-inbox/2026-09-16-RVTools_export.zip"]),
         )
+
+
+class OnlyTheMailInboxRaisesTheArtifactFinding(unittest.TestCase):
+    """`customer-artifact-awaiting-review` says a CUSTOMER sent something and is
+    blocked on us. A file we wrote ourselves makes that sentence false.
+
+    There were two call sites. The scoped one reads `<slug>/mail-inbox/`, where
+    loop/mail-probe.py saves what actually arrived by mail. The other walked the
+    whole opp directory, so any commit into `<slug>/` raised it.
+
+    Measured 9/17/26 on the live repo: of four findings, three came from the broad
+    walk and all three were our own output committed hours earlier --
+    toyota/roi/tx-automotive-instinct-coder-roi.pdf, aunalytics/gpu/*, and
+    tesla/2026-09-17-shi-recap-coverage.md. Each routed a session that found
+    nothing to do.
+    """
+
+    def test_the_broad_walk_does_not_raise_the_artifact_finding(self):
+        # Structural, like test_the_check_runs_before_the_staleness_gate above: the
+        # defect is a call SITE, so read the source and assert there is exactly one,
+        # and that it is the scoped one.
+        import inspect
+        src = inspect.getsource(cli.cmd_triage)
+        self.assertEqual(
+            1, src.count('add("customer-artifact-awaiting-review"'),
+            "customer-artifact-awaiting-review must have exactly one call site, "
+            "scoped to MAIL_INBOX -- a second, unscoped one files our own files "
+            "as though a customer were waiting on us",
+        )
+
+    def test_the_one_call_site_is_the_scoped_one(self):
+        import inspect
+        src = inspect.getsource(cli.cmd_triage)
+        call = src.index('add("customer-artifact-awaiting-review"')
+        # unreviewed_artifacts(...) / repo_touched_since(..., subdir=MAIL_INBOX) is
+        # the line that feeds it, and it sits just above the call.
+        self.assertIn("subdir=MAIL_INBOX", src[:call],
+                      "the surviving call site must read the mail-inbox, not the opp dir")
+
+    def test_touched_still_feeds_the_thin_sweep_signal_count(self):
+        """Removing the finding must not remove the variable. thin-sweep-entry counts
+        `len(touched) + len(meetings)` to decide a placeholder entry has substance
+        behind it, and that count is still wanted."""
+        import inspect
+        src = inspect.getsource(cli.cmd_triage)
+        self.assertIn("touched = repo_touched_since(slug, since)", src)
+        self.assertIn("sig = len(touched) + len(meetings)", src)

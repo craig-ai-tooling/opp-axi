@@ -2022,11 +2022,26 @@ def cmd_triage(a):
         deep_done.add(slug)
         deep += 1
 
+        # `touched` still feeds thin-sweep-entry below as a signal COUNT. It does not
+        # raise customer-artifact-awaiting-review any more.
+        #
+        # It used to. The broad walk asks "did any file under <slug>/ change", which on
+        # a worked opp is almost always a file WE wrote, and filing that as "a customer
+        # sent an artifact and is blocked on us" is simply a false statement about who
+        # is waiting on whom. Measured 9/17/26, the three findings it produced that
+        # night were toyota/roi/tx-automotive-instinct-coder-roi.pdf, aunalytics/gpu/*
+        # and tesla/2026-09-17-shi-recap-coverage.md -- every one of them committed
+        # hours earlier by our own sessions. Three of four findings false, and each one
+        # routed a session that found nothing to do.
+        #
+        # The same reasoning is already written above the MAIL_INBOX call site, which
+        # notes the ungated walk "turned one real finding into six, five of them our
+        # own assessments and terraform". That fix scoped the NEW call site and left
+        # this one, so the noise it describes kept shipping. This is that fix finished.
+        #
+        # What a customer actually sent arrives through loop/mail-probe.py into
+        # <slug>/mail-inbox/, and the call site above fires on exactly that.
         touched = repo_touched_since(slug, since)
-        if touched:
-            add("customer-artifact-awaiting-review", slug,
-                f"{len(touched)} new file(s) in the opp dir since {since}",
-                ", ".join(touched[:3]))
 
         wrecs, wmeta = wispr_load()
         toks = match_tokens(slug, _acct(idx.get(slug, {})), (idx.get(slug) or {}).get("aliases") or ())
