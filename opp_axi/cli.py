@@ -1509,6 +1509,60 @@ def suppression_for(pattern, slug, today):
     return None
 
 
+def _git_tracked_commit_dates(repo_root, pathspec):
+    """{path-relative-to-repo_root: last-commit epoch seconds} for every
+    tracked file git has ever committed under PATHSPEC, from ONE `git log`
+    call -- never one subprocess per file.
+
+    This is the fix for the class of bug, not just the one report: a
+    filesystem mtime was trusted as a proxy for "a human touched this," and
+    checkout is not a human touching anything. `git worktree add` (every
+    dispatched triage session runs in one) and a plain `git clone` both stamp
+    every tracked file with the moment it hit disk, so a file last committed
+    months ago reads as modified today. Git's own history already has the
+    true answer for anything it tracks, so a tracked file's date comes from
+    here, full stop -- mtime is not blended in. Checkout time is always >=
+    the last commit's committer date, so "take the newer of the two" can
+    never fix this: it would still pick the checkout-stamped mtime every
+    time and reproduce the exact bug this function exists to close.
+
+    An untracked file (a customer's RVTools zip or docx dropped into
+    mail-inbox, not yet committed by us) has no git history to fall back to.
+    That is fine -- it is also exactly the case this pattern exists to catch,
+    and mtime is the only signal that exists for it. Callers keep using
+    mtime whenever a path is absent from the dict this returns.
+
+    Returns {} -- never raises -- if `repo_root` is not a git repo, `git` is
+    missing, or the call times out. Callers then treat every file as
+    untracked, which is the pre-existing mtime-only behavior.
+    """
+    try:
+        p = subprocess.run(
+            ["git", "-C", repo_root, "log", "--name-only", "-z",
+             "--pretty=format:%x01%ct", "--", pathspec],
+            capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return {}
+    if p.returncode != 0 or not p.stdout:
+        return {}
+    dates = {}
+    ts = None
+    for tok in p.stdout.split("\0"):
+        if not tok:
+            continue
+        if tok[0] == "\x01":
+            ts_str, _, tok = tok[1:].partition("\n")
+            try:
+                ts = int(ts_str)
+            except ValueError:
+                ts = None
+        if tok and ts is not None:
+            # git log lists newest commit first; the first date seen for a
+            # path is its most recent, which is the one we want.
+            dates.setdefault(tok, ts)
+    return dates
+
+
 def repo_touched_since(slug, since, subdir=None):
     """Files under the opp dir modified since `since`, excluding the notes we write ourselves —
     OPP.md changing is our own footprint, not a customer signal.
@@ -1517,22 +1571,31 @@ def repo_touched_since(slug, since, subdir=None):
     the SE working the opp, not the customer producing an artifact to review. Measured
     9/2/26 -- dropping a draft into an opp dir raised both an
     customer-artifact-awaiting-review and a thin-sweep-entry finding against an opp
-    that has had no contact at all."""
+    that has had no contact at all.
+
+    For a TRACKED file, "touched" is git's last-commit date for it, not its
+    mtime -- see `_git_tracked_commit_dates`. For an UNTRACKED file, mtime is
+    still the signal, since git has nothing else to offer for it."""
     base = os.path.join(REPO, slug, subdir) if subdir else os.path.join(REPO, slug)
     rel_to = os.path.join(REPO, slug)
     out = []
     if not os.path.isdir(base):
         return out
+    tracked = _git_tracked_commit_dates(REPO, os.path.relpath(base, REPO))
     for root, dirs, files in os.walk(base):
         dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
         for fn in files:
             if fn in ("OPP.md", "CLAUDE.md", ".salesforce.json") or fn.startswith("DRAFT-"):
                 continue
             fp = os.path.join(root, fn)
-            try:
-                mt = datetime.fromtimestamp(os.path.getmtime(fp)).date()
-            except OSError:
-                continue
+            commit_ts = tracked.get(os.path.relpath(fp, REPO))
+            if commit_ts is not None:
+                mt = datetime.fromtimestamp(commit_ts).date()
+            else:
+                try:
+                    mt = datetime.fromtimestamp(os.path.getmtime(fp)).date()
+                except OSError:
+                    continue
             if mt >= since:
                 out.append(os.path.relpath(fp, rel_to))
     return out
