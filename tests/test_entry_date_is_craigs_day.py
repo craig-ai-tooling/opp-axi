@@ -10,7 +10,6 @@ Measured: the per-opp sessions dayclose queued on 9/16 Pacific wrote tesla and
 texas-instruments at 02:08-02:25 UTC, which is 19:08-19:25 Pacific on the 16th.
 Both entries carry `9/17/26`.
 """
-import os
 import unittest
 from datetime import datetime
 from unittest import mock

@@ -18,7 +18,6 @@ import sys
 import tempfile
 import time
 import unittest
-from datetime import datetime
 from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
