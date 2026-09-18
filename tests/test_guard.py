@@ -18,7 +18,6 @@ import sys
 import tempfile
 import time
 import unittest
-from datetime import datetime
 from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -398,7 +397,11 @@ class TestLint(unittest.TestCase):
 
 class TestCmdActivity(StateDirCase):
     def test_same_day_dedupe_refused_without_amend(self):
-        stamp = datetime.now().strftime("%-m/%-d/%y")
+        # Craig's calendar day, not the box's. These two assert "an entry already
+        # written TODAY blocks a second one", so the fixture's notion of today has to
+        # be the same one cmd_activity stamps with -- the box runs UTC and Craig reads
+        # Pacific, so after 17:00 Pacific they are different dates.
+        stamp = cli.today_stamp()
         record = {"Sales_Engineer_Overview__c":
                   f"{stamp} CS: already wrote today\n9/1/26 CS: older"}
         fake_query, fake_patch = _fake_sf(record)
@@ -411,7 +414,11 @@ class TestCmdActivity(StateDirCase):
         m_patch.assert_not_called()
 
     def test_amend_replaces_only_todays_entry(self):
-        stamp = datetime.now().strftime("%-m/%-d/%y")
+        # Craig's calendar day, not the box's. These two assert "an entry already
+        # written TODAY blocks a second one", so the fixture's notion of today has to
+        # be the same one cmd_activity stamps with -- the box runs UTC and Craig reads
+        # Pacific, so after 17:00 Pacific they are different dates.
+        stamp = cli.today_stamp()
         record = {"Sales_Engineer_Overview__c":
                   f"{stamp} CS: already wrote today\n9/1/26 CS: older, untouched"}
         fake_query, fake_patch = _fake_sf(record)
