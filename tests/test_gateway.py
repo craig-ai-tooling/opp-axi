@@ -39,6 +39,9 @@ class _Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         self.server.last_path = self.path
         self.server.last_auth = self.headers.get("Authorization")
+        self.server.last_ua = self.headers.get("User-Agent")
+        self.server.last_cf_id = self.headers.get("CF-Access-Client-Id")
+        self.server.last_cf_secret = self.headers.get("CF-Access-Client-Secret")
         length = int(self.headers.get("Content-Length") or 0)
         self.server.last_body = json.loads(self.rfile.read(length) or b"{}")
         status, payload = self.server.script
@@ -55,6 +58,9 @@ class GatewayClient(unittest.TestCase):
     def setUpClass(cls):
         cls.httpd = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
         cls.httpd.script = (200, {"records": [], "totalSize": 0, "done": True})
+        cls.httpd.last_ua = None
+        cls.httpd.last_cf_id = None
+        cls.httpd.last_cf_secret = None
         cls.url = f"http://127.0.0.1:{cls.httpd.server_address[1]}"
         threading.Thread(target=cls.httpd.serve_forever, daemon=True).start()
 
@@ -166,6 +172,109 @@ class GatewayClient(unittest.TestCase):
             with self.assertRaises(gateway.GatewayError) as cm:
                 gateway.sf_query("DELETE FROM Opportunity")
         self.assertIn("read-only", str(cm.exception))
+
+    # -- user agent -------------------------------------------------------
+
+    def test_a_named_user_agent_is_sent_not_pythons_default(self):
+        """Cloudflare's Browser Integrity Check 403s `Python-urllib/*` with error
+        1010, before Access or the gateway sees the request -- a valid service
+        token does not save you. Measured 9/18/26 against the live hostname."""
+        self.httpd.script = (200, {"records": [], "totalSize": 0, "done": True})
+        with self.env():
+            gateway.sf_query("SELECT Id FROM Opportunity")
+        ua = self.httpd.last_ua
+        self.assertTrue(ua)
+        self.assertNotIn("Python-urllib", ua)
+        self.assertIn("opp-axi", ua)
+
+    def test_a_1010_block_is_named_rather_than_reported_as_a_refusal(self):
+        self.httpd.script = (403, b"error code: 1010")
+        with self.env():
+            with self.assertRaises(gateway.GatewayError) as cm:
+                gateway.sf_query("SELECT Id FROM Opportunity")
+        msg = str(cm.exception)
+        self.assertIn("Browser Integrity Check", msg)
+        self.assertIn("User-Agent", msg)
+
+    # -- cloudflare access ----------------------------------------------
+
+    def test_access_headers_are_sent_when_configured(self):
+        self.httpd.script = (200, {"records": [], "totalSize": 0, "done": True})
+        with self.env(CF_ACCESS_CLIENT_ID="cid-123", CF_ACCESS_CLIENT_SECRET="sec-456"):
+            gateway.sf_query("SELECT Id FROM Opportunity")
+        self.assertEqual(self.httpd.last_cf_id, "cid-123")
+        self.assertEqual(self.httpd.last_cf_secret, "sec-456")
+
+    def test_no_access_credential_sends_no_headers(self):
+        """A direct in-cluster call has no Access in front of it, so absent
+        credentials must not become an error or an empty header."""
+        self.httpd.script = (200, {"records": [], "totalSize": 0, "done": True})
+        with mock.patch.dict(os.environ, {
+            "LAWNMOWER_GATEWAY": self.url,
+            "LAWNMOWER_GATEWAY_TOKEN": TOKEN,
+            "LAWNMOWER_GATEWAY_CF_ACCESS_FILE": "/nonexistent/cf",
+        }, clear=True):
+            gateway.sf_query("SELECT Id FROM Opportunity")
+        self.assertIsNone(self.httpd.last_cf_id)
+
+    def test_access_credentials_are_read_from_the_file(self):
+        import tempfile
+
+        with tempfile.NamedTemporaryFile("w", suffix=".cf", delete=False) as fh:
+            fh.write("# lm-42\nCF_ACCESS_CLIENT_ID=file-cid\nCF_ACCESS_CLIENT_SECRET=file-sec\n")
+            path = fh.name
+        try:
+            self.httpd.script = (200, {"records": [], "totalSize": 0, "done": True})
+            with mock.patch.dict(os.environ, {
+                "LAWNMOWER_GATEWAY": self.url,
+                "LAWNMOWER_GATEWAY_TOKEN": TOKEN,
+                "LAWNMOWER_GATEWAY_CF_ACCESS_FILE": path,
+            }, clear=True):
+                gateway.sf_query("SELECT Id FROM Opportunity")
+            self.assertEqual(self.httpd.last_cf_id, "file-cid")
+            self.assertEqual(self.httpd.last_cf_secret, "file-sec")
+        finally:
+            os.unlink(path)
+
+    def test_a_followed_access_login_page_is_named_too(self):
+        """urlopen follows the redirect, so the common case is a 200 of HTML
+        from cloudflareaccess.com rather than an HTTPError. Reported as "not
+        JSON" it reads like the gateway misbehaving; the request never got
+        there. This is what actually happened on 9/18/26."""
+        self.httpd.script = (200, b"<html>Sign in</html>")
+        with self.env():
+            with mock.patch.object(
+                gateway.urllib.request, "urlopen", wraps=gateway.urllib.request.urlopen
+            ):
+                # simulate the followed redirect by reporting a cloudflareaccess URL
+                real = gateway.urllib.request.urlopen
+
+                class _Resp:
+                    def __init__(self, inner): self._i = inner
+                    def __enter__(self): return self
+                    def __exit__(self, *a): self._i.close()
+                    def read(self): return b"<html>Sign in</html>"
+                    def geturl(self): return "https://craigcloud.cloudflareaccess.com/cdn-cgi/access/login/toolgw"
+
+                with mock.patch.object(gateway.urllib.request, "urlopen",
+                                       lambda req, timeout=None: _Resp(real(req, timeout=timeout))):
+                    with self.assertRaises(gateway.GatewayError) as cm:
+                        gateway.sf_query("SELECT Id FROM Opportunity")
+        msg = str(cm.exception)
+        self.assertIn("Cloudflare Access", msg)
+        self.assertIn("CF_ACCESS_CLIENT_ID", msg)
+
+    def test_an_access_login_redirect_says_so_rather_than_blaming_the_gateway(self):
+        """Cloudflare answers 302 to the login page when no service token is
+        sent. Reported as a generic refusal it sends you to read gateway logs
+        that contain nothing, because the request never reached the gateway."""
+        self.httpd.script = (302, b"")
+        with self.env():
+            with self.assertRaises(gateway.GatewayError) as cm:
+                gateway.sf_query("SELECT Id FROM Opportunity")
+        msg = str(cm.exception)
+        self.assertIn("Cloudflare Access", msg)
+        self.assertIn("CF_ACCESS_CLIENT_ID", msg)
 
     # -- token -----------------------------------------------------------
 

@@ -91,6 +91,8 @@ there are five should say so.
 | `LAWNMOWER_GATEWAY` | unset | base URL of the lm-42 tool gateway. **Unset is the local `sf` CLI, exactly as before.** Set, `sf data query` goes over HTTP and a gateway failure is a refusal, not a quiet retry against `sf` |
 | `LAWNMOWER_GATEWAY_TOKEN` | unset | bearer token; falls back to `LAWNMOWER_GATEWAY_TOKEN_FILE` |
 | `LAWNMOWER_GATEWAY_TOKEN_FILE` | `~/.config/lawnmower/tool-gateway-token` | where the token is read from when the env var is unset |
+| `CF_ACCESS_CLIENT_ID` / `CF_ACCESS_CLIENT_SECRET` | unset | Cloudflare Access service token, required for the gateway's public hostname |
+| `LAWNMOWER_GATEWAY_CF_ACCESS_FILE` | `~/.config/lawnmower/tool-gateway-cf-access` | where those are read from when the env vars are unset |
 
 ### The tool gateway (lm-42)
 
@@ -100,8 +102,15 @@ changes nothing, which is what lets verbs move one at a time.
 
 ```sh
 opp-axi opps                                          # local sf, as always
-LAWNMOWER_GATEWAY=http://tool-gateway.lawnmower.svc opp-axi opps
+LAWNMOWER_GATEWAY=http://tool-gateway.lawnmower.svc opp-axi opps   # in-cluster
+LAWNMOWER_GATEWAY=https://toolgw.craigcloud.io opp-axi opps        # anywhere else
 ```
+
+The public hostname is behind Cloudflare Access, so it needs a service token as well as
+the gateway's own bearer token. Both are read from `~/.config/lawnmower/` by default, so
+setting `LAWNMOWER_GATEWAY` alone is enough on a machine that has them. Without the
+service token Cloudflare answers a login redirect, and opp-axi says exactly that rather
+than reporting a gateway fault.
 
 Verified 9/17/26: byte-identical output both ways (45 opps, 5,476 bytes), 3.0s local
 against 3.7s through the gateway.
