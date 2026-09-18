@@ -291,8 +291,29 @@ INDUSTRY = {"healthcare", "health", "medical", "insurance", "financial", "bank",
 
 
 def match_tokens(slug, account, aliases=()):
+    """Tokens that, found in a meeting title or summary, mean it is about this account.
+
+    The slug and the account name ARE split into words -- "blue-yonder" has to match a
+    meeting that says "Blue Yonder". An ALIAS is not split, because an alias is a phrase
+    someone wrote on purpose and its individual words are not claims about the account.
+
+    Measured 9/17/26: quiktrip carries the aliases "quik trip" and "quick trip".
+    Splitting them put the bare word `quick` in its token set, and `quick` matched the
+    Wispr meeting "shi/tesla quick precall" -- a Tesla call attributed to QuikTrip. That
+    is the dangerous shape of this bug: not a missed match, but a real customer meeting
+    filed against a different customer, where `meeting-without-record` would route a
+    session to write SE Activity onto the wrong record.
+
+    The INDUSTRY set already guards the same failure for words like "health" and
+    "logistics". It cannot guard "quick", and the fix is not a longer stop-list: the
+    word was never evidence in the first place.
+
+    Checked against every account in the repo before shipping. Exactly one token set
+    changes -- quiktrip loses `quick`, `quik` and `trip`, and keeps `quiktrip`,
+    `quick trip`, `quik trip` and `qt`. No other account loses anything.
+    """
     toks = set()
-    for src in (slug.replace("-", " "), account or "", " ".join(aliases)):
+    for src in (slug.replace("-", " "), account or ""):
         for w in re.split(r"[^A-Za-z0-9]+", src.lower()):
             if len(w) >= 4 and w not in STOP:
                 toks.add(w)
