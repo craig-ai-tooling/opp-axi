@@ -1972,8 +1972,25 @@ def cmd_triage(a):
                                "until": str(entry.get("until")),
                                "why": " ".join(str(entry.get("why") or "").split())[:120]})
             return
+        # `work` is NOT truncated. It has exactly one consumer -- _push_to_inbox()
+        # interpolates it into the item body -- and that body is the whole instruction
+        # the routed session ever receives for this finding. Cutting it at 150
+        # characters cut the instruction, mid-sentence, for every pattern.
+        #
+        # Measured on the items dayclose filed 9/17/26. patterns.yaml's
+        # customer-artifact-awaiting-review `work` is ~700 characters and tells the
+        # session to commit only what it DERIVES from the customer's file, to name the
+        # artifact's path in the log entry (which is what the done-check reads back),
+        # and to leave a draft rather than send. What the session actually got was:
+        #
+        #   "A customer sent an artifact and it is already saved in <slug>/mail-inbox/.
+        #    That direct"
+        #
+        # None of the constraints survived. `why` and `detail` stay bounded because
+        # they are generated strings that can run long; `work` is hand-written policy
+        # whose length is deliberate.
         findings.append({"pattern": pid, "slug": slug, "priority": p.get("priority", 3),
-                         "why": why, "work": " ".join((p.get("work") or "").split())[:150],
+                         "why": why, "work": " ".join((p.get("work") or "").split()),
                          "detail": detail})
 
     for r in recs:

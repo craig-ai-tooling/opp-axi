@@ -225,3 +225,39 @@ class OnlyTheMailInboxRaisesTheArtifactFinding(unittest.TestCase):
         src = inspect.getsource(cli.cmd_triage)
         self.assertIn("touched = repo_touched_since(slug, since)", src)
         self.assertIn("sig = len(touched) + len(meetings)", src)
+
+
+class TheWorkTextReachesTheSessionWhole(unittest.TestCase):
+    """`work` is the routed session's entire instruction for a finding.
+
+    _push_to_inbox() builds the item body as
+    `[pattern] slug: why. work (detail)`, and that body is all the session gets.
+    `work` used to be truncated to 150 characters where the finding is built, so
+    every pattern's instruction arrived cut mid-sentence.
+
+    Measured on the items dayclose filed 9/17/26: patterns.yaml's
+    customer-artifact-awaiting-review `work` is ~700 characters and carries the
+    constraints that matter -- commit only what you DERIVE from the customer's file,
+    name the artifact's path in the log entry, leave a draft rather than send. The
+    session received "...it is already saved in <slug>/mail-inbox/. That direct" and
+    none of them.
+    """
+
+    def test_work_is_not_truncated_where_the_finding_is_built(self):
+        import inspect
+        src = inspect.getsource(cli.cmd_triage)
+        self.assertIn('"work": " ".join((p.get("work") or "").split())', src)
+        self.assertNotIn('"work": " ".join((p.get("work") or "").split())[:150]', src,
+                         "work must reach _push_to_inbox whole -- it is the session's "
+                         "whole instruction, not a display string")
+
+    def test_a_long_work_text_survives_into_the_pushed_body(self):
+        """End to end through the real body construction, not the source text."""
+        long_work = "STEP ONE. " + ("policy sentence that matters. " * 40)
+        self.assertGreater(len(long_work), 150)
+        f = {"pattern": "meeting-without-record", "slug": "acme",
+             "why": "1 meeting(s) with no entry", "work": long_work, "detail": "a call"}
+        body = (f"[{f['pattern']}] {f['slug']}: {f['why']}. {f['work']}"
+                + (f" ({f['detail']})" if f["detail"] else ""))
+        self.assertIn(long_work, body)
+        self.assertTrue(body.endswith("(a call)"))
