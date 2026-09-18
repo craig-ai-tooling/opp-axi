@@ -2009,7 +2009,7 @@ def cmd_triage(a):
         "SELECT Id,Name,Amount,CloseDate,StageName,Sales_Engineer_Overview__c,POV_Pass__c,"
         f"Hands_on_Eval_POV_URL__c FROM Opportunity WHERE {OPEN_WHERE} ORDER BY CloseDate")
 
-    findings, scanned, deep = [], 0, 0
+    findings, scanned, deep, truncated = [], 0, 0, 0
     suppressed = []
     today_iso = datetime.now().date().isoformat()
     deep_done = set()
@@ -2091,7 +2091,15 @@ def cmd_triage(a):
         needs_look = thin or not d or (d and d < since) or (who and who != INITIALS)
         if not (needs_look and slug):
             continue
-        if deep >= a.max_deep or slug in deep_done:
+        if slug in deep_done:
+            continue
+        # The cap is a runaway guard, not a ration, and when it bites it SAYS SO.
+        # Measured 9/17/26: the default of 15 cut a 45-opp pipeline off at 15 and
+        # printed nothing, so albertsons and tesla each had a real meeting with no SE
+        # Activity entry and neither produced a finding. The nightly pass had been
+        # examining a third of the board and reporting a clean result.
+        if deep >= a.max_deep:
+            truncated += 1
             continue
         deep_done.add(slug)
         deep += 1
@@ -2141,7 +2149,7 @@ def cmd_triage(a):
         wstatus, wdetail = wispr_freshness(_wm)
         print(json.dumps({
             "version": __version__, "since": since.isoformat(), "se": ME,
-            "scanned": scanned, "deep": deep,
+            "scanned": scanned, "deep": deep, "truncated": truncated,
             "findings": findings,
             "suppressed": suppressed,
             "wispr_cache": {"status": wstatus, "last_sync": (_wm or {}).get("last_sync"),
@@ -2151,7 +2159,10 @@ def cmd_triage(a):
         emit(f"triage since={since} se={ME} patterns={len(patterns)}",
              toon("findings", ["pattern", "slug", "why", "detail"], findings),
              f"\nscanned:{scanned} deep:{deep} findings:{len(findings)}"
-             + (f" suppressed:{len(suppressed)}" if suppressed else ""),
+             + (f" suppressed:{len(suppressed)}" if suppressed else "")
+             + (f"\n  TRUNCATED: {truncated} opp(s) needed a look and did not get one "
+                f"(--max-deep {a.max_deep}). Raise it or they go unexamined."
+                if truncated else ""),
              # Withheld, never silent: a suppression nobody can see is indistinguishable
              # from a pattern that quietly stopped working.
              ("\n" + "\n".join(
@@ -2634,8 +2645,14 @@ def main():
     s = sub.add_parser("triage", help="signal -> pattern -> proposed work")
     s.add_argument("--since", help="YYYY-MM-DD")
     s.add_argument("--days", type=int, default=7)
-    s.add_argument("--max-deep", type=int, default=15,
-                   help="cap on opps that get the expensive evidence fan-out")
+    # 60, not 15. The fan-out is a filesystem walk of one opp dir plus a match
+    # against the already-loaded Wispr cache -- no API call, no network. Measured
+    # 9/17/26 on the live 45-opp board: --max-deep 15 took 2s and found 1 finding,
+    # --max-deep 60 took 3s and found 3. One second bought 22 more opps and two real
+    # meetings that had no SE Activity entry. 15 was rationing something cheap.
+    s.add_argument("--max-deep", type=int, default=60,
+                   help="runaway guard on opps that get the evidence fan-out; "
+                        "the run says so when it bites")
     s.add_argument("--push", action="store_true", help="queue findings to the dispatch inbox")
     s.add_argument("--json", action="store_true",
                   help="findings + suppression state (pattern, slug, until) as JSON")
