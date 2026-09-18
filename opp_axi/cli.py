@@ -102,6 +102,42 @@ ORG = os.environ.get("SF_ORG", "spectrocloud")
 ME = os.environ.get("OPP_SE", "CraigSmith")
 INITIALS = os.environ.get("OPP_INITIALS", "CS")
 API = "v67.0"
+
+# THIS BOX RUNS Etc/UTC AND CRAIG READS PACIFIC. A date stamp has to be HIS calendar
+# day, because that is what the stamp claims: `9/17/26 CS:` says Craig did this on the
+# 17th. `datetime.now()` is naive local time, so from 17:00 Pacific onward it already
+# reads as tomorrow.
+#
+# That window is not an edge case here, it is when the automation runs.
+# lawnmower-dayclose fires at 18:00 Pacific, which is 01:00 UTC the next day, and every
+# SE Activity entry the nightly chain writes lands inside it. Measured: the per-opp
+# sessions dayclose queued on 9/16 Pacific wrote tesla and texas-instruments at
+# 02:08-02:25 UTC, which is 19:08-19:25 Pacific on the 16th, and both entries carry
+# `9/17/26`. Craig's own day was the 16th.
+#
+# It also breaks the sweep's completeness check. customer-opportunities'
+# docs/se-activity.md says to count "open opps vs. opps carrying that date", and a
+# stamp that rolls over mid-evening splits one sweep across two dates.
+#
+# Same reasoning and the same default as loop/dayclose.sh's DAYCLOSE_TZ and
+# loop/backlog-now.sh's DISPLAY_TZ.
+OPP_TZ = os.environ.get("OPP_TZ") or os.environ.get("LAWNMOWER_TZ") or "America/Los_Angeles"
+
+
+def now_local():
+    """`datetime.now()` in Craig's timezone, naive, so callers can .strftime() and
+    subtract timedeltas exactly as before."""
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.now(ZoneInfo(OPP_TZ)).replace(tzinfo=None)
+    except Exception:
+        # An unknown zone name or a system with no tzdata must not stop a write.
+        return datetime.now()
+
+
+def today_stamp():
+    """The `M/D/YY` an SE Activity entry is stamped with."""
+    return now_local().strftime("%-m/%-d/%y")
 WISPR_DIR = os.environ.get("OPP_WISPR_DIR") or os.path.expanduser("~/.cache/opp-axi/wispr")
 # Wispr is OPTIONAL. Three states, deliberately distinct:
 #   off      — declared absent by the operator. Not a gap; exits clean.
@@ -607,7 +643,7 @@ def cmd_sweep(a):
                 thin.append({**row, "entry": first_line(act)[:64]})
     total = len(recs)
     cov = round(100 * swept / total) if total else 0
-    stamp = datetime.now().strftime("%-m/%-d/%y")
+    stamp = today_stamp()
 
     blocks = [f"sweep since={since} se={ME}",
               toon("missing", ["id", "slug", "amt", "close", "last", "why"], missing),
@@ -656,9 +692,9 @@ def cmd_activity(a):
             f"Secondary-SE assignment is not write access — keep context in OPP.md.", E_REFUSED)
     text = a.add.strip()
     if not re.match(r"^\d{1,2}/\d{1,2}/\d{2,4}|^\d{4}-\d{2}-\d{2}", text):
-        text = f"{datetime.now().strftime('%-m/%-d/%y')} {INITIALS}: {text}"
+        text = f"{today_stamp()} {INITIALS}: {text}"
     existing = r.get("Sales_Engineer_Overview__c") or ""
-    stamp = datetime.now().strftime("%-m/%-d/%y")
+    stamp = today_stamp()
 
     hits = guard.lint(text, allow=a.allow)
     if hits:
@@ -1482,7 +1518,7 @@ def cmd_evidence(a):
     wwarn = wispr_line(wrecs, wmeta, hi)
 
     n = (len(cal_rows) + len(zoom_rows) + len(mail_rows) + len(repo_rows) + len(wispr_rows))
-    stamp = datetime.now().strftime("%-m/%-d/%y")
+    stamp = today_stamp()
     emit(
         f"evidence {slug} {since}..{hi - timedelta(days=1)} domains:{';'.join(dl) or '-'}",
         (f"wispr: {'disabled' if wstate == 'off' else 'UNAVAILABLE'} — not searched"
