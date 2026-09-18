@@ -2174,7 +2174,11 @@ def cmd_triage(a):
                  "opp-axi evidence <slug>") if findings else nxt("nothing to queue"))
 
     if a.push and findings:
-        _push_to_inbox(findings)
+        rc = _push_to_inbox(findings)
+        if rc:
+            # Non-zero so a nightly caller can branch on it. loop/dayclose.sh's brief
+            # tells the session to re-run after sourcing ~/.config/dispatch/env.
+            return rc
 
 
 def _push_to_inbox(findings):
@@ -2204,9 +2208,17 @@ def _push_to_inbox(findings):
     else:
         # Could not read the inbox. File nothing rather than risk another round of
         # duplicates: a missed finding reappears tomorrow, a duplicate never leaves.
+        #
+        # The bail is right. Exiting 0 after it was not. `--push` was ASKED to queue
+        # work and queued none, and the caller could not tell that from a quiet night.
+        # Measured twice: the dayclose runs of 9/16 and 9/17/26 both lost their whole
+        # push here -- `dispatch ls` returns secret_unavailable in a routed session
+        # that has no DISPATCH_SECRET_FILE -- and both times the run carried on,
+        # reported, and looked like it had worked. The 9/17 session only noticed
+        # because it re-ran the command by hand.
         print("  (could not read the inbox — not queueing, to avoid duplicates)",
               file=sys.stderr)
-        return
+        return E_PARTIAL
 
     ok = dup = 0
     for f in findings:
@@ -2220,6 +2232,9 @@ def _push_to_inbox(findings):
             ok += 1
     print(f"\nqueued:{ok}/{len(findings)} to the inbox"
           + (f" ({dup} already open)" if dup else ""))
+    # Queueing nothing because everything is ALREADY OPEN is a real, healthy outcome
+    # and stays 0. Only an unreadable inbox is a failure.
+    return E_OK
 
 
 FIELDS = {
@@ -2697,9 +2712,20 @@ def main():
 
     a = p.parse_args()
     if not a.cmd:
-        cmd_overview(a)
+        rc = cmd_overview(a)
     else:
-        a.fn(a)
+        rc = a.fn(a)
+    # A command's return value is its exit code when it bothers to give one. Most
+    # return None and mean 0. `triage --push` returns E_PARTIAL when it was asked to
+    # queue work and could not read the inbox to do it -- before this, that return was
+    # discarded here and the process exited 0, which is how two nightly day-closes
+    # queued nothing and still looked like they had worked.
+    #
+    # Guarded on `isinstance(rc, int)` rather than truthiness: a command that returns
+    # some other object is not declaring an exit code, and must not be read as one.
+    if isinstance(rc, int) and rc:
+        sys.stdout.flush()
+        sys.exit(rc)
     # A command that finished while a declared source went unread did NOT do what it
     # was asked. Say so in the exit code, not only in stdout that nobody parses.
     if _GAPS:
