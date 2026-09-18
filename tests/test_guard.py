@@ -92,7 +92,11 @@ class TestVersionBump(unittest.TestCase):
         # var does nothing on this box until the zipapp is rebuilt, so a caller
         # that sets it would keep using the local `sf` credential and read that
         # as the gateway working.
-        self.assertEqual(__version__, "0.1.19")
+        # 0.1.20 sends Cloudflare Access service-token headers, without which
+        # the gateway's public hostname answers a login redirect instead of
+        # JSON. Same zipapp rule: until `make install` runs, a caller pointed at
+        # toolgw.craigcloud.io gets the redirect and no explanation.
+        self.assertEqual(__version__, "0.1.20")
 
 
 class TestStateDir(StateDirCase):
