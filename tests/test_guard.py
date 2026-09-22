@@ -96,7 +96,13 @@ class TestVersionBump(unittest.TestCase):
         # the gateway's public hostname answers a login redirect instead of
         # JSON. Same zipapp rule: until `make install` runs, a caller pointed at
         # toolgw.craigcloud.io gets the redirect and no explanation.
-        self.assertEqual(__version__, "0.1.20")
+        # 0.1.21 moves the TOON/exit-code output helpers (`toon`, `emit`, `nxt`,
+        # `die`, `size_hint`, the E_* codes) out of cli.py and into opp_axi/axi.py,
+        # vendored byte-for-byte from craig-ai-tooling/axi-py so this tool and
+        # palette-axi/monday-axi/launchpad-axi stop drifting apart. No verb or
+        # output changed, but a version bump is still the only place this repo
+        # records that the vendored copy moved.
+        self.assertEqual(__version__, "0.1.21")
 
 
 class TestStateDir(StateDirCase):

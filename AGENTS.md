@@ -14,7 +14,10 @@ One Python package, stdlib only. `opp_axi/cli.py` holds every verb.
 `cli.py` named `CONNECTORS`, and that is deliberate: one table, one place to look.
 
 - `opp_axi/__init__.py` — `__version__`. The only place a release bumps.
-- `opp_axi/cli.py` — verbs, TOON output, connector probes, `doctor`.
+- `opp_axi/axi.py` — the TOON encoder, `emit`/`nxt`/`die`/`size_hint`, and exit codes,
+  vendored from [craig-ai-tooling/axi-py](https://github.com/craig-ai-tooling/axi-py) by
+  `make vendor-axi`. Never edit it here; see its header.
+- `opp_axi/cli.py` — verbs, connector probes, `doctor`.
 - `opp_axi/guard.py` — the write guard: `guarded_patch()` is the only path to
   `sf_patch()`, plus `activity`'s lint/dedupe and the `field`/`undo`/`writes` verbs.
 - `opp_axi/rep.py` — rep/AE-owned Opportunity data, READ-ONLY: the `rep` verb (one
