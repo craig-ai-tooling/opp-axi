@@ -147,7 +147,7 @@ WISPR_ENABLED = (os.environ.get("OPP_WISPR", "on").strip().lower()
 WISPR_STALE_DAYS = 2
 WISPR_GAP_HOURS = 6   # a same-day sync can still predate that day's meetings
 
-E_OK, E_ERR, E_USAGE, E_NOTFOUND, E_REFUSED, E_PARTIAL = 0, 1, 2, 3, 4, 5
+from .axi import E_OK, E_ERR, E_USAGE, E_NOTFOUND, E_REFUSED, E_PARTIAL
 
 # Sources that could not be consulted during this run. A command that finishes with a
 # non-empty ledger exits E_PARTIAL: it did work, but something it was supposed to look
@@ -165,50 +165,10 @@ OPEN_WHERE = f"IsClosed = false AND SA_Assignment_Oppty__c = '{ME}'"
 
 
 # ── output ─────────────────────────────────────────────────────────────────
-def _tv(v):
-    """TOON scalar: quote only when it would break the row.
-
-    None and False are DIFFERENT facts and must not share a cell. Collapsing
-    False into "" made "POV not required" read identically to "nobody knows",
-    which is exactly the kind of silent wrong answer this tool exists to stop.
-    Empty means unknown; false means known-false."""
-    if v is None:
-        return ""
-    if v is True:
-        return "true"
-    if v is False:
-        return "false"
-    s = str(v).replace("\r", "")
-    if any(c in s for c in ',"\n'):
-        return '"' + s.replace('"', '""').replace("\n", "\\n") + '"'
-    return s
-
-
-def toon(name, fields, rows, indent="  "):
-    """TOON block. rows==[] yields a definitive `name[0]{...}: (none)` — never ambiguous."""
-    head = f"{name}[{len(rows)}]{{{','.join(fields)}}}:"
-    if not rows:
-        return head + " (none)"
-    return "\n".join([head] + [indent + ",".join(_tv(r.get(f)) for f in fields) for r in rows])
-
-
-def emit(*parts):
-    print("\n".join(p for p in parts if p))
-
-
-def nxt(*suggestions):
-    """Principle 9 — contextual disclosure."""
-    return "\nnext: " + " | ".join(suggestions) if suggestions else ""
-
-
-def die(msg, code=E_ERR):
-    print(f"error: {msg}", file=sys.stderr)
-    sys.exit(code)
-
-
-def size_hint(full, shown):
-    extra = len(full) - len(shown)
-    return f"  [+{extra}B truncated, --full]" if extra > 0 else ""
+# toon, emit, nxt, die, size_hint (and toon's _tv helper) are vendored in
+# opp_axi/axi.py — see that file's header. Imported by name (not `from . import
+# axi`) so cli.die / cli.emit stay valid attributes for tests that monkeypatch them.
+from .axi import die, emit, nxt, size_hint, toon
 
 
 # ── subprocess plumbing ────────────────────────────────────────────────────
