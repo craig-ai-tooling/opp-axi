@@ -150,6 +150,8 @@ opp-axi undo <write-id>       # restore a guarded write's prior value
 opp-axi writes                # audit log of guarded writes
 opp-axi writes --full --json  # + friendly label and the whole old/new values
 opp-axi cal --date today
+opp-axi cal --date today --json   # full events incl. all-day/offset start+end, ext domains, my_response
+opp-axi followups                 # open opps ranked for a look today, with reasons (--limit 0 for all)
 opp-axi mail 'subject:X newer_than:2d'
 opp-axi evidence <ref>       # cal + zoom + mail + repo + wispr
 opp-axi wispr                # cached meetings, matched to opps

@@ -73,7 +73,7 @@ class StateDirCase(unittest.TestCase):
 
 
 class TestVersionBump(unittest.TestCase):
-    def test_version_is_0_1_18(self):
+    def test_version_is_0_1_22(self):
         # This test exists so a version bump is a decision rather than a side effect.
         # 0.1.11 was the multipicklist set-comparison fix (#15). Ungating the
         # customer-artifact signal needs its own bump, because the box runs a BUILT
@@ -102,7 +102,14 @@ class TestVersionBump(unittest.TestCase):
         # palette-axi/monday-axi/launchpad-axi stop drifting apart. No verb or
         # output changed, but a version bump is still the only place this repo
         # records that the vendored copy moved.
-        self.assertEqual(__version__, "0.1.21")
+        # 0.1.22 fixes `cal`'s day window to Craig's calendar day instead of a UTC
+        # day (it was reading 5pm-yesterday..5pm-today Pacific as "today" from
+        # 5:30am Pacific onward), adds `cal --json` and a declined-self-attendee
+        # filter, and adds the `followups` verb -- a ranked, explainable "who to
+        # follow up on today" list the ai-lawnmower morning brief consumes. Two new
+        # JSON contracts another program depends on, so the same zipapp rule
+        # applies: `make install` here before the brief reads them.
+        self.assertEqual(__version__, "0.1.22")
 
 
 class TestStateDir(StateDirCase):

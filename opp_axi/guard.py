@@ -253,17 +253,30 @@ def dedupe_top_entry(existing, stamp, initials):
 _LEADING_DATE = re.compile(r"^[-\s]*(?:\d{4}-\d{1,2}-\d{1,2}|\d{1,2}/\d{1,2}/\d{2,4})")
 
 
+def _top_entry_end(lines):
+    """Index of the first line (from 1) that starts a NEW entry, or len(lines) when
+    the whole field is one entry with no second dated line."""
+    for i in range(1, len(lines)):
+        if _LEADING_DATE.match(lines[i]):
+            return i
+    return len(lines)
+
+
+def top_entry(existing):
+    """Just the newest entry's text -- everything from line 0 up to (not including)
+    the next line that starts with a date. Shares the boundary rule with
+    amend_top_entry so "the newest entry" means the same span whether it is being
+    read (followups' Next: extraction) or replaced (activity --amend)."""
+    lines = existing.split("\n")
+    return "\n".join(lines[:_top_entry_end(lines)])
+
+
 def amend_top_entry(existing, new_entry):
     """Replace today's top entry — everything from line 0 up to (not including) the
     next line that starts with a date — with `new_entry`. No second dated line means
     the whole field was one entry, and it is replaced entirely."""
     lines = existing.split("\n")
-    end = len(lines)
-    for i in range(1, len(lines)):
-        if _LEADING_DATE.match(lines[i]):
-            end = i
-            break
-    rest = lines[end:]
+    rest = lines[_top_entry_end(lines):]
     return new_entry + ("\n" + "\n".join(rest) if rest else "")
 
 

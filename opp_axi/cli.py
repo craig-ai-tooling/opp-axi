@@ -138,6 +138,27 @@ def now_local():
 def today_stamp():
     """The `M/D/YY` an SE Activity entry is stamped with."""
     return now_local().strftime("%-m/%-d/%y")
+
+
+def craig_day_bounds(day):
+    """Local midnight -> next local midnight in Craig's timezone (OPP_TZ), as two
+    RFC3339 timestamps carrying that day's real UTC offset -- e.g.
+    2026-09-22T00:00:00-07:00 in PDT, -08:00 in PST. `cal`'s old `...Z` bounds were
+    a UTC day, not Craig's: at 5:30am Pacific, "today" through midnight-to-midnight
+    UTC was actually 5pm-yesterday..5pm-today Pacific. Same OPP_TZ source of truth
+    as now_local()/today_stamp() (see 2ef6211). `day` is a date. Falls back to a
+    naive UTC-labeled Z window on a system with no tzdata, same fallback as
+    now_local()."""
+    try:
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo(OPP_TZ)
+        lo = datetime(day.year, day.month, day.day, tzinfo=tz)
+        hi = lo + timedelta(days=1)
+        return lo.isoformat(timespec="seconds"), hi.isoformat(timespec="seconds")
+    except Exception:
+        lo = datetime(day.year, day.month, day.day)
+        hi = lo + timedelta(days=1)
+        return lo.strftime("%Y-%m-%dT00:00:00Z"), hi.strftime("%Y-%m-%dT00:00:00Z")
 WISPR_DIR = os.environ.get("OPP_WISPR_DIR") or os.path.expanduser("~/.cache/opp-axi/wispr")
 # Wispr is OPTIONAL. Three states, deliberately distinct:
 #   off      — declared absent by the operator. Not a gap; exits clean.
@@ -492,6 +513,52 @@ def money(n):
     return f"{int(n):,}" if n else "0"
 
 
+def mdy(iso):
+    """'YYYY-MM-DD' (or a longer SF datetime string) -> 'M/D/YY'. Empty in, empty out --
+    an unknown date must never render as today's date."""
+    if not iso:
+        return ""
+    try:
+        d = datetime.strptime(iso[:10], "%Y-%m-%d").date()
+    except ValueError:
+        return iso
+    return d.strftime("%-m/%-d/%y")
+
+
+# ── followups: the "Next:" label inside the newest SE Activity entry ─────────
+NEXT_LABEL = re.compile(r"\bnext(?:\s+steps?)?\s*:\s*", re.I)
+_MINE_CS = re.compile(r"\bCS\b")
+_MINE_CRAIG = re.compile(r"\bCraig\b", re.I)
+
+
+def trim_word_boundary(text, limit=200):
+    """TEXT cut to at most LIMIT chars, breaking at the last whitespace at or before
+    the limit rather than mid-word. No whitespace in range -> hard cut at LIMIT."""
+    text = (text or "").strip()
+    if len(text) <= limit:
+        return text
+    cut = text.rfind(" ", 0, limit)
+    return text[:cut if cut > 0 else limit].rstrip()
+
+
+def extract_next(entry_text):
+    """The text after a `Next:` / `Next steps:` label (case-insensitive) inside
+    ENTRY_TEXT -- the newest SE Activity entry ONLY, already isolated by the caller
+    via guard.top_entry() -- trimmed to ~200 chars at a word boundary. '' when the
+    entry names no next step. Requires the colon: "next meeting is Tuesday" is
+    prose, not a label."""
+    m = NEXT_LABEL.search(entry_text or "")
+    if not m:
+        return ""
+    return trim_word_boundary(entry_text[m.end():], 200)
+
+
+def next_names_me(next_text):
+    """True when a `Next:` text names Craig by initials (CS, whole word) or by
+    first name -- the two forms actually seen in SE Activity entries."""
+    return bool(_MINE_CS.search(next_text or "") or _MINE_CRAIG.search(next_text or ""))
+
+
 # ── commands ───────────────────────────────────────────────────────────────
 def cmd_overview(a):
     """No args: live pipeline + aggregates. Principle 8 — content first, not help text."""
@@ -691,12 +758,23 @@ def cmd_activity(a):
         sys.exit(E_ERR)
 
 
+def _self_response(ev):
+    """responseStatus of the caller's own attendee entry on EV ('self': true), or
+    '' when EV has no attendees list at all (e.g. a solo hold Craig created)."""
+    for x in (ev.get("attendees") or []):
+        if x.get("self"):
+            return x.get("responseStatus") or ""
+    return ""
+
+
 def cmd_cal(a):
     """Calendar normalized to what an SE needs. Raw Google API is ~1.5k tok/event."""
     g = gcli()
-    day = (datetime.strptime(a.date, "%Y-%m-%d") if a.date and a.date not in ("today", "tomorrow")
-           else datetime.now() + timedelta(days=1 if a.date == "tomorrow" else 0))
-    lo, hi = day.strftime("%Y-%m-%dT00:00:00Z"), (day + timedelta(days=1)).strftime("%Y-%m-%dT00:00:00Z")
+    if a.date and a.date not in ("today", "tomorrow"):
+        day = datetime.strptime(a.date, "%Y-%m-%d").date()
+    else:
+        day = now_local().date() + timedelta(days=1 if a.date == "tomorrow" else 0)
+    lo, hi = craig_day_bounds(day)
     if g == "gws":
         params = json.dumps({"calendarId": "primary", "timeMin": lo, "timeMax": hi,
                              "singleEvents": True, "orderBy": "startTime"})
@@ -708,24 +786,124 @@ def cmd_cal(a):
         d = _parse_json(p.stdout, "calendar")
         items = d.get("items", d) if isinstance(d, (dict, list)) else []
     match = build_matcher(opp_index())
-    rows = []
+    rows, jevents = [], []
     for ev in items:
         if (ev.get("status") or "") == "cancelled":
             continue
-        st = (ev.get("start") or {}).get("dateTime") or (ev.get("start") or {}).get("date") or ""
+        my_resp = _self_response(ev)
+        if my_resp == "declined":
+            continue
+        start, end = ev.get("start") or {}, ev.get("end") or {}
+        st = start.get("dateTime") or start.get("date") or ""
+        en = end.get("dateTime") or end.get("date") or ""
+        all_day = "dateTime" not in start
         atts = [x.get("email", "") for x in (ev.get("attendees") or [])]
         ext = sorted({e.split("@")[-1] for e in atts
                       if "@" in e and not e.endswith("spectrocloud.com")})
+        summary = ev.get("summary") or ""
+        opp = match(summary, ext)
         rows.append({"time": st[11:16] if "T" in st else "all-day",
-                     "summary": (ev.get("summary") or "")[:52],
+                     "summary": summary[:52],
                      "n": len(atts), "ext": ";".join(ext[:3]),
-                     "opp": match(ev.get("summary", ""), ext)})
+                     "opp": opp})
+        jevents.append({"start": st, "end": en, "all_day": all_day, "summary": summary,
+                        "attendees": len(atts), "ext_domains": ext, "opp": opp,
+                        "my_response": my_resp})
+    if a.json:
+        print(json.dumps({"date": day.strftime("%Y-%m-%d"), "events": jevents}, indent=2))
+        return
     ext_rows = [r for r in rows if r["ext"]]
     emit(f"calendar {day.strftime('%Y-%m-%d')}",
          toon("events", ["time", "summary", "n", "ext", "opp"], rows),
          f"\nevents:{len(rows)} customerFacing:{len(ext_rows)} "
          f"matched:{sum(1 for r in rows if r['opp'])}",
          nxt("opp-axi opp <slug>", 'opp-axi mail "subject:X newer_than:2d"'))
+
+
+def cmd_followups(a):
+    """Open opps ranked for a look today, deterministic and explainable.
+
+    One SOQL query, no per-opp fan-out. Every point on the score is a fact an SE
+    can check against the record -- this is a checklist, not a model's opinion.
+    Only the NEWEST SE Activity entry is read for `next`/`next_mine`, isolated via
+    guard.top_entry() (the same boundary `activity --amend` replaces); the rep's
+    Next_Steps__c is read the same way rep.py reads it, through rep.parse_next_steps.
+    """
+    recs = sf_query(
+        "SELECT Id,Name,StageName,Amount,CloseDate,SE_Forecast__c,Tech_Risk_Status__c,"
+        f"Sales_Engineer_Overview__c,Next_Steps__c FROM Opportunity WHERE {OPEN_WHERE}")
+    i2s = id_to_slug(opp_index())
+    today = now_local().date()
+
+    scored = []
+    for r in recs:
+        act = r.get("Sales_Engineer_Overview__c") or ""
+        top = guard.top_entry(act) if act else ""
+        next_text = extract_next(top)
+        next_mine = next_names_me(next_text) if next_text else False
+        last = entry_date(act)
+
+        close_raw = r.get("CloseDate") or ""
+        close_days = close_d = None
+        if close_raw:
+            close_d = datetime.strptime(close_raw[:10], "%Y-%m-%d").date()
+            close_days = (close_d - today).days
+
+        forecast = r.get("SE_Forecast__c") or ""
+        tech_risk = r.get("Tech_Risk_Status__c") or ""
+
+        score, reasons = 0, []
+        if close_days is not None and close_days < 0:
+            score += 4
+            reasons.append(f"close date passed {close_d.strftime('%-m/%-d/%y')}")
+        elif close_days is not None and 0 <= close_days <= 14:
+            score += 3
+            reasons.append(f"closes {close_d.strftime('%-m/%-d/%y')}")
+        if next_mine:
+            score += 3
+            reasons.append("your next step")
+        risk_bits = []
+        if forecast in ("At Risk", "Needs Attention"):
+            risk_bits.append(f"forecast {forecast}")
+        if "High" in tech_risk:
+            risk_bits.append("tech risk High")
+        if risk_bits:
+            score += 1
+            reasons += risk_bits
+        stale = (today - last).days if last else None
+        if stale is None or stale > 10:
+            score += 1
+            reasons.append(f"no SE entry since {last.strftime('%-m/%-d/%y')}" if last
+                           else "no SE entry logged")
+
+        if score == 0:
+            continue
+
+        entries = rep.parse_next_steps(r.get("Next_Steps__c") or "", (), today)
+        rep_next = trim_word_boundary(entries[0]["text"], 200) if entries else ""
+
+        scored.append({
+            "slug": i2s.get(r["Id"][:15], "-"), "name": r.get("Name") or "",
+            "stage": r.get("StageName") or "", "amount": r.get("Amount") or 0,
+            "close": close_raw, "close_days": close_days, "score": score,
+            "reasons": reasons, "next": next_text, "next_mine": next_mine,
+            "rep_next": rep_next, "last_entry": last.isoformat() if last else None,
+        })
+
+    scored.sort(key=lambda x: (-x["score"], -(x["amount"] or 0)))
+    total = len(scored)
+    shown = scored if a.limit == 0 else scored[:a.limit]
+
+    if a.json:
+        print(json.dumps({"today": today.isoformat(), "count": total,
+                          "followups": shown}, indent=2))
+        return
+
+    rows = [{"slug": x["slug"], "score": x["score"], "close": mdy(x["close"]),
+             "reasons": "; ".join(x["reasons"]), "next": x["next"]} for x in shown]
+    emit(toon("followups", ["slug", "score", "close", "reasons", "next"], rows),
+         f"\ntoday:{today.isoformat()} scored:{total} shown:{len(shown)}",
+         nxt("opp-axi opp <slug>", "opp-axi rep <slug>", "opp-axi activity <slug> --add \"...\""))
 
 
 def cmd_mail(a):
@@ -2583,7 +2761,14 @@ def main():
 
     s = sub.add_parser("cal", help="calendar, normalized + opp-matched")
     s.add_argument("--date", default="today", help="today|tomorrow|YYYY-MM-DD")
+    s.add_argument("--json", action="store_true")
     s.set_defaults(fn=cmd_cal)
+
+    s = sub.add_parser("followups", help="open opps ranked for a look today, with reasons")
+    s.add_argument("--limit", type=int, default=5,
+                   help="rows to print; 0 for every scored opp (default: 5)")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(fn=cmd_followups)
 
     s = sub.add_parser("mail", help="gmail search + headers in one shot")
     s.add_argument("query", help="gmail q: syntax, e.g. 'subject:<account> newer_than:2d'")
