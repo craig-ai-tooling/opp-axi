@@ -167,6 +167,11 @@ WISPR_ENABLED = (os.environ.get("OPP_WISPR", "on").strip().lower()
                  not in ("off", "0", "false", "no"))
 WISPR_STALE_DAYS = 2
 WISPR_GAP_HOURS = 6   # a same-day sync can still predate that day's meetings
+# Our own email domains. A Wispr meeting whose every other participant is on one of these
+# is an internal sync, whatever customer its summary talks about. OPP_INTERNAL_DOMAINS adds
+# more (comma-separated).
+INTERNAL_DOMAINS = tuple({"spectrocloud.com", *(d.strip().lower().lstrip("@") for d in
+                          os.environ.get("OPP_INTERNAL_DOMAINS", "").split(",") if d.strip())})
 
 from .axi import E_OK, E_ERR, E_USAGE, E_NOTFOUND, E_REFUSED, E_PARTIAL
 
@@ -1437,12 +1442,60 @@ def wispr_freshness(meta, window_end=None):
     return "ok", ""
 
 
+def _internal_email(e):
+    d = e.rsplit("@", 1)[-1].lower()
+    return any(d == x or d.endswith("." + x) for x in INTERNAL_DOMAINS)
+
+
+def wispr_internal_names(recs):
+    """Names seen anywhere in the cache with an internal email. Wispr's Zoom-side
+    participants often arrive as a bare name; a name we have seen on a spectrocloud.com
+    calendar invite is a colleague."""
+    out = set()
+    for m in recs:
+        for p in m.get("participants") or ():
+            if any(_internal_email(e) for e in p.get("emails") or ()):
+                out.add((p.get("name") or "").strip().lower())
+    out.discard("")
+    return out
+
+
+def wispr_is_internal(m, known):
+    """True only when the meeting is PROVABLY internal: at least one other participant,
+    and every one of them either has only internal emails or is a name `known` to be a
+    colleague. A participant with an external email, or an unknown name with no email,
+    makes it not-internal.
+
+    `participants` comes from /wispr-sync (get_meeting_participants_enriched). A record
+    without the key predates that field; it is never called internal, so an old cache
+    matches exactly as before. Wispr's own `relationship` is not used: Craig's Wispr login
+    is a gmail.com address, so it labels every colleague `external`.
+
+    Without this, matching on title + summary sent internal 1:1s to customer opps
+    (Craig / Matt touchpoint -> optum, Brad / Craig sync -> blue-yonder) and
+    `meeting-without-record` routed sessions to log a customer call that never happened."""
+    ps = m.get("participants")
+    if not ps:
+        return False
+    for p in ps:
+        emails = [e for e in p.get("emails") or () if "@" in e]
+        if emails:
+            if not all(_internal_email(e) for e in emails):
+                return False
+        elif (p.get("name") or "").strip().lower() not in known:
+            return False
+    return True
+
+
 def wispr_match(recs, toks, since, limit, snip):
     rows = []
     lo = since.strftime("%Y-%m-%d")
+    known = wispr_internal_names(recs)
     for m in recs:
         st = (m.get("start") or "")[:10]
         if not st or st < lo:
+            continue
+        if wispr_is_internal(m, known):
             continue
         hay = norm_hay((m.get("title") or "") + " " + (m.get("summary") or ""))
         # Same rule as the calendar path: an industry word alone is not evidence. Without
@@ -1484,19 +1537,25 @@ def _cmd_wispr_json(a, recs, meta):
 
     idx = opp_index()
     match = build_matcher(idx)
-    rows, unmatched = [], 0
+    known = wispr_internal_names(recs)
+    rows, unmatched, internal = [], 0, 0
     for m in sorted(recs, key=lambda r: r.get("start") or "", reverse=True):
         mst = (m.get("start") or "")[:10]
         if not mst or mst < since.strftime("%Y-%m-%d"):
             continue
-        slug = match((m.get("title") or "") + " " + (m.get("summary") or "")[:200], [])
-        if not slug:
+        is_int = wispr_is_internal(m, known)
+        slug = None if is_int else match(
+            (m.get("title") or "") + " " + (m.get("summary") or "")[:200], [])
+        if is_int:
+            internal += 1
+        elif not slug:
             unmatched += 1
         rows.append({"date": mst, "title": m.get("title") or "",
-                     "n": len(m.get("attendees") or []), "opp": slug or None})
+                     "n": len(m.get("attendees") or []), "opp": slug, "internal": is_int})
     print(json.dumps({**base, "meetings": rows,
-                      "counts": {"meetings": len(rows), "matched": len(rows) - unmatched,
-                                 "unmatched": unmatched}}, indent=2))
+                      "counts": {"meetings": len(rows),
+                                 "matched": len(rows) - unmatched - internal,
+                                 "unmatched": unmatched, "internal": internal}}, indent=2))
 
 
 def cmd_wispr(a):
@@ -1520,19 +1579,25 @@ def cmd_wispr(a):
     match = build_matcher(idx)
     since = (datetime.strptime(a.since, "%Y-%m-%d").date() if a.since
              else datetime.now().date() - timedelta(days=a.days))
-    rows, unmatched = [], 0
+    known = wispr_internal_names(recs)
+    rows, unmatched, internal = [], 0, 0
     for m in sorted(recs, key=lambda r: r.get("start") or "", reverse=True):
         st = (m.get("start") or "")[:10]
         if not st or st < since.strftime("%Y-%m-%d"):
             continue
-        slug = match((m.get("title") or "") + " " + (m.get("summary") or "")[:200], [])
-        if not slug:
-            unmatched += 1
+        if wispr_is_internal(m, known):
+            internal += 1
+            slug = "(internal)"
+        else:
+            slug = match((m.get("title") or "") + " " + (m.get("summary") or "")[:200], [])
+            if not slug:
+                unmatched += 1
         rows.append({"date": st[5:], "title": (m.get("title") or "")[:48],
                      "n": len(m.get("attendees") or []), "opp": slug or "-"})
     emit(f"wispr since={since} cached={len(recs)} last_sync={(meta or {}).get('last_sync','?')[:10]}",
          toon("meetings", ["date", "title", "n", "opp"], rows),
-         f"\nmeetings:{len(rows)} matched:{len(rows) - unmatched} unmatched:{unmatched}",
+         f"\nmeetings:{len(rows)} matched:{len(rows) - unmatched - internal} "
+         f"unmatched:{unmatched} internal:{internal}",
          f"\n{line}" if line else "",
          nxt("opp-axi evidence <slug>", "/wispr-sync to refresh"))
 

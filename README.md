@@ -83,6 +83,7 @@ there are five should say so.
 | `OPP_INITIALS` | `CS` | stamped on SE Activity entries |
 | `OPP_WISPR` | `on` | `off` declares Wispr out of scope |
 | `OPP_WISPR_DIR` | `~/.cache/opp-axi/wispr` | meeting cache (outside the repo: verbatim customer speech) |
+| `OPP_INTERNAL_DOMAINS` | (none) | extra internal email domains, comma-separated; `spectrocloud.com` is always internal. A Wispr meeting whose other participants are all internal never matches an opp |
 | `OPP_PATTERNS` | `~/code/ai-lawnmower/patterns/patterns.yaml` | `triage` rules |
 | `OPP_CS_FOLDER` | resolved by name at runtime | `Customers` folder id, to skip the name lookup |
 | `OPP_CS_DRIVE` | `Customer Success` | shared drive `folder` searches |
