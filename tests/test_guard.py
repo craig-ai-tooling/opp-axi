@@ -73,7 +73,7 @@ class StateDirCase(unittest.TestCase):
 
 
 class TestVersionBump(unittest.TestCase):
-    def test_version_is_0_1_22(self):
+    def test_version_is_0_1_23(self):
         # This test exists so a version bump is a decision rather than a side effect.
         # 0.1.11 was the multipicklist set-comparison fix (#15). Ungating the
         # customer-artifact signal needs its own bump, because the box runs a BUILT
@@ -109,7 +109,10 @@ class TestVersionBump(unittest.TestCase):
         # follow up on today" list the ai-lawnmower morning brief consumes. Two new
         # JSON contracts another program depends on, so the same zipapp rule
         # applies: `make install` here before the brief reads them.
-        self.assertEqual(__version__, "0.1.22")
+        # 0.1.23 drops provably-internal Wispr meetings (every other participant
+        # on spectrocloud.com) from matching, so `meeting-without-record` stops
+        # routing sessions for internal 1:1s. `wispr --json` gains `internal`.
+        self.assertEqual(__version__, "0.1.23")
 
 
 class TestStateDir(StateDirCase):
