@@ -73,7 +73,7 @@ class StateDirCase(unittest.TestCase):
 
 
 class TestVersionBump(unittest.TestCase):
-    def test_version_is_0_1_23(self):
+    def test_version_is_0_1_24(self):
         # This test exists so a version bump is a decision rather than a side effect.
         # 0.1.11 was the multipicklist set-comparison fix (#15). Ungating the
         # customer-artifact signal needs its own bump, because the box runs a BUILT
@@ -112,7 +112,10 @@ class TestVersionBump(unittest.TestCase):
         # 0.1.23 drops provably-internal Wispr meetings (every other participant
         # on spectrocloud.com) from matching, so `meeting-without-record` stops
         # routing sessions for internal 1:1s. `wispr --json` gains `internal`.
-        self.assertEqual(__version__, "0.1.23")
+        # 0.1.24 stops `writes` crashing on a checkbox write: the ledger holds
+        # Has_Technical_Success_Plan__c=True as a JSON boolean and first_line()
+        # called .strip() on it.
+        self.assertEqual(__version__, "0.1.24")
 
 
 class TestStateDir(StateDirCase):
@@ -871,6 +874,17 @@ class TestCmdWritesFull(StateDirCase):
         self.assertEqual(row["new"], "9/16/26 CS: onsite recap logged.")
         self.assertNotIn("old", row)
         self.assertNotIn("label", row)
+
+    def test_a_boolean_write_lists_instead_of_crashing(self):
+        """Checkbox fields land in the ledger as JSON booleans. `writes` called
+        .strip() on True and died with AttributeError (backlog opp-writes-bool-crash)."""
+        self._one_write(new=True, old=False, field="Has_Technical_Success_Plan__c")
+        self.assertEqual(self._rows(full=False)[0]["new"], "True")
+        self.assertIs(self._rows()[0]["new"], True)
+
+    def test_a_false_write_is_not_blanked(self):
+        self._one_write(new=False, old=True, field="Has_Technical_Success_Plan__c")
+        self.assertEqual(self._rows(full=False)[0]["new"], "False")
 
     def test_full_honours_since_and_opp_the_same_way(self):
         self._one_write()

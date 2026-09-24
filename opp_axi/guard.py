@@ -475,8 +475,8 @@ def cmd_undo(a):
     current = _read_field(rec["opp"], rec["field"])
     if not _same(current, rec["new"], rec["field"]):
         cli.die(f"{rec['field']} on {rec['slug']} no longer matches write {a.write_id} — "
-                 f"refusing undo.\n  recorded: {cli.first_line(rec['new'] or '')}\n"
-                 f"  current:  {cli.first_line(current or '')}", cli.E_REFUSED)
+                 f"refusing undo.\n  recorded: {cli.first_line(rec['new'])}\n"
+                 f"  current:  {cli.first_line(current)}", cli.E_REFUSED)
 
     new_rec = guarded_patch(rec["opp"], rec["slug"], rec["field"], rec["old"], current,
                             reason=f"undo {a.write_id}", dry_run=a.dry_run)
@@ -524,7 +524,7 @@ def cmd_writes(a):
                  "status": r.get("status")} for r in latest]
     else:
         rows = [{"id": r.get("id"), "at": r.get("at"), "slug": r.get("slug"),
-                 "field": r.get("field"), "new": cli.first_line(r.get("new") or ""),
+                 "field": r.get("field"), "new": cli.first_line(r.get("new")),
                  "status": r.get("status")} for r in latest]
 
     if getattr(a, "json", False):
