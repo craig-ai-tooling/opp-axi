@@ -476,7 +476,11 @@ def build_matcher(idx):
 
 # ── SE-activity dates ──────────────────────────────────────────────────────
 def first_line(text):
-    return (text or "").strip().split("\n")[0].strip()
+    # The writes ledger stores checkbox fields as JSON booleans, so `text` can be
+    # True/False. `False or ""` would also blank a real False, hence the None test.
+    if text is None:
+        return ""
+    return str(text).strip().split("\n")[0].strip()
 
 
 def entry_date(text):
