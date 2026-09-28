@@ -73,7 +73,7 @@ class StateDirCase(unittest.TestCase):
 
 
 class TestVersionBump(unittest.TestCase):
-    def test_version_is_0_1_24(self):
+    def test_version_is_0_1_25(self):
         # This test exists so a version bump is a decision rather than a side effect.
         # 0.1.11 was the multipicklist set-comparison fix (#15). Ungating the
         # customer-artifact signal needs its own bump, because the box runs a BUILT
@@ -115,7 +115,12 @@ class TestVersionBump(unittest.TestCase):
         # 0.1.24 stops `writes` crashing on a checkbox write: the ledger holds
         # Has_Technical_Success_Plan__c=True as a JSON boolean and first_line()
         # called .strip() on it.
-        self.assertEqual(__version__, "0.1.24")
+        # 0.1.25 removes "discount" from match_tokens()'s account-evidence set for
+        # Discount Tire Centers -- it is a generic sales-negotiation word, and two
+        # unrelated meetings ("discount offer", "discounting") got attributed to
+        # that opp's meeting-without-record flag this week. Same zipapp rule:
+        # `make install` here before triage stops re-filing the false match.
+        self.assertEqual(__version__, "0.1.25")
 
 
 class TestStateDir(StateDirCase):
