@@ -300,7 +300,12 @@ STOP = {"corp", "inc", "llc", "ltd", "the", "company", "corporation", "group",
         # generic across many accounts — matching on these produces wrong-deal evidence
         "international", "enterprise", "enterprises", "services", "service", "holdings",
         "industries", "global", "partners", "communications", "companies", "worldwide",
-        "consulting", "software", "hardware", "digital", "platform", "spectro", "cloud"}
+        "consulting", "software", "hardware", "digital", "platform", "spectro", "cloud",
+        # a sales-negotiation word, not a claim about Discount Tire Centers. Measured
+        # 9/24/26: "discount" (bare word, 9/21) and "discounting" (suffix match, 9/24)
+        # each attributed a different customer's pricing call to Discount Tire — the
+        # word was never evidence in the first place, same shape as quiktrip/"quick".
+        "discount"}
 
 # Not stop words — these are real evidence when the domain agrees. But as a bare Gmail
 # `subject:` term they drag in every other account in the same industry, which is how
