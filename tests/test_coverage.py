@@ -237,3 +237,22 @@ class AmountSort(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PlaceholderIsAnchoredTest(unittest.TestCase):
+    """is_placeholder read the whole first line, so 'no change block tracking' inside a
+    full entry marked it thin (novus, 9/28/26)."""
+
+    def test_real_placeholders_still_thin(self):
+        from opp_axi.cli import is_placeholder
+        for t in ("9/18/26 CS: No new activity this week.",
+                  "9/18/26 CS: Nothing to report.",
+                  "2026-03-20 - No update",
+                  "No progress"):
+            self.assertTrue(is_placeholder(t), t)
+
+    def test_substantive_entry_mentioning_no_change_is_not_thin(self):
+        from opp_axi.cli import is_placeholder
+        t = ("9/28/26 CS: Precall done. KubeVirt has no change block tracking yet, "
+             "so large disks may back up slower. Next: get the outcome.")
+        self.assertFalse(is_placeholder(t))

@@ -506,8 +506,12 @@ def entry_date(text):
         return None
 
 
+# The phrase must OPEN the entry body (after the date and initials). Searching the whole
+# first line flagged 9/28/26's substantive Novus entry as a placeholder because it said
+# "KubeVirt has no change block tracking".
 PLACEHOLDER = re.compile(
-    r"no\s+(new\s+)?(activity|update|updates|change|changes|progress)|nothing\s+to\s+report",
+    r"^(?:[-\u2013\u2014\s]*\d[\d/\-]*\s*[-\u2013\u2014]?\s*(?:[A-Z]{2,3}\s*:)?)?\s*"
+    r"(?:no\s+(?:new\s+)?(?:activity|updates?|changes?|progress)\b|nothing\s+to\s+report\b)",
     re.I)
 
 
