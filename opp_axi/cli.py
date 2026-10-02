@@ -506,6 +506,19 @@ def entry_date(text):
         return None
 
 
+def latest_entry_by_slug(recs, i2s):
+    """slug -> newest dated SE Activity entry across every open opp of that account."""
+    out = {}
+    for r in recs:
+        slug = i2s.get(r["Id"][:15], "")
+        d = entry_date(r.get("Sales_Engineer_Overview__c"))
+        if slug and d and d > out.get(slug, d):
+            out[slug] = d
+        elif slug and d:
+            out.setdefault(slug, d)
+    return out
+
+
 # The phrase must OPEN the entry body (after the date and initials). Searching the whole
 # first line flagged 9/28/26's substantive Novus entry as a placeholder because it said
 # "KubeVirt has no change block tracking".
@@ -2226,6 +2239,7 @@ def cmd_triage(a):
         f"Hands_on_Eval_POV_URL__c FROM Opportunity WHERE {OPEN_WHERE} ORDER BY CloseDate")
 
     findings, scanned, deep, truncated = [], 0, 0, 0
+    latest_entry = latest_entry_by_slug(recs, i2s)
     suppressed = []
     today_iso = datetime.now().date().isoformat()
     deep_done = set()
@@ -2344,7 +2358,12 @@ def cmd_triage(a):
         wrecs, wmeta = wispr_load()
         toks = match_tokens(slug, _acct(idx.get(slug, {})), (idx.get(slug) or {}).get("aliases") or ())
         meetings = wispr_match(wrecs, toks, since, 5, 90) if toks else []
-        if meetings and (not d or d < since):
+        # A meeting matches the ACCOUNT, so the entry that answers it may sit on any of the
+        # account's opps. `d` is this opp's alone: loves has five open opps and one of
+        # them carries the 10/1/26 entry, so the empty and April ones re-fired this every
+        # night after the entry was written (measured 10/2/26).
+        acct_d = latest_entry.get(slug)
+        if meetings and (not acct_d or acct_d < since):
             add("meeting-without-record", slug,
                 f"{len(meetings)} meeting(s) since {since} with no SE Activity entry after them",
                 meetings[0]["title"][:70])
