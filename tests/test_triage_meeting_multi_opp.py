@@ -39,8 +39,8 @@ class LatestEntryBySlug(unittest.TestCase):
 class TriageUsesTheAccountDate(unittest.TestCase):
     def test_the_finding_reads_the_account_date_not_the_opp_date(self):
         src = inspect.getsource(cli.cmd_triage)
-        self.assertIn("if meetings and (not acct_d or acct_d < since):", src)
-        self.assertNotIn("if meetings and (not d or d < since):", src)
+        self.assertIn("if found and (not acct_d or acct_d < since):", src)
+        self.assertNotIn("(not d or d < since)", src)
 
 
 if __name__ == "__main__":

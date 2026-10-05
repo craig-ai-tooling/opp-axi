@@ -120,7 +120,10 @@ class TestVersionBump(unittest.TestCase):
         # unrelated meetings ("discount offer", "discounting") got attributed to
         # that opp's meeting-without-record flag this week. Same zipapp rule:
         # `make install` here before triage stops re-filing the false match.
-        self.assertEqual(__version__, "0.1.25")
+        # 0.1.26 stops meeting-without-record re-filing a finding a session already
+        # closed, and attributes a meeting to the one account it names instead of
+        # every account that shares a word with it ("toyota" -> tmhna and woven).
+        self.assertEqual(__version__, "0.1.26")
 
 
 class TestStateDir(StateDirCase):
