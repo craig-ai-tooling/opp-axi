@@ -22,13 +22,14 @@ from __future__ import annotations
 
 import argparse
 import glob
+import hashlib
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from opp_axi import __version__, csfolder, gateway, guard, oppmd, rep
 
@@ -101,6 +102,10 @@ REPO, REPO_SOURCE = _resolve_repo()
 ORG = os.environ.get("SF_ORG", "spectrocloud")
 ME = os.environ.get("OPP_SE", "CraigSmith")
 INITIALS = os.environ.get("OPP_INITIALS", "CS")
+# The owner as the Wispr cache spells the name. OPP_SE is the Salesforce alias
+# ("CraigSmith"); an attendee list says "Craig Smith". Split on the case change
+# instead of carrying a second setting for the same person.
+OWNER_NAME = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", ME).strip().lower()
 API = "v67.0"
 
 # THIS BOX RUNS Etc/UTC AND CRAIG READS PACIFIC. A date stamp has to be HIS calendar
@@ -1513,7 +1518,95 @@ def wispr_is_internal(m, known):
     return True
 
 
-def wispr_match(recs, toks, since, limit, snip):
+# ── whose meeting is it ────────────────────────────────────────────────────
+#
+# One rule decides whether a Wispr meeting is about an account, and `evidence` and `triage`
+# both go through it (wispr_match), so they cannot disagree.
+#
+# Measured 10/3/26: `triage --push` filed meeting-without-record for woven three times in 75
+# minutes. "Woven by Toyota" and "Toyota Material Handling North America" both own the word
+# "toyota", so every Toyota call matched toyota, tmhna AND woven. The woven session rejected
+# it (the transcript never says Woven), wrote no SE Activity, and the finding came back 30
+# minutes after the item closed. Sessions then started writing "not a Woven meeting" entries
+# into Salesforce just to make it stop.
+PORTFOLIO_ACCOUNTS = 3     # a meeting about this many accounts is a pipeline review
+
+
+def _account_key(slug, d):
+    """The unit "distinct accounts" is counted in: the normalized account name. Two slugs of
+    one account are one account. An index entry with no account name stands alone."""
+    return norm_hay(_acct(d)).strip() or slug
+
+
+def ambiguous_tokens(idx):
+    """Tokens in the match_tokens() of two or more DISTINCT accounts.
+
+    "toyota" is one: Toyota North America, Toyota Material Handling and Woven by Toyota all
+    carry it. A word several accounts own is not evidence for any one of them."""
+    owners = {}
+    for slug, d in idx.items():
+        key = _account_key(slug, d)
+        for t in match_tokens(slug, _acct(d), d.get("aliases") or ()):
+            owners.setdefault(t, set()).add(key)
+    return frozenset(t for t, accts in owners.items() if len(accts) > 1)
+
+
+def colleague_only(m, known):
+    """A record WITHOUT `participants` whose attendee names, the owner aside, are all names
+    `known` to be colleagues.
+
+    It cannot be called internal: a customer call with a colleague-only attendee list is
+    ordinary (Teradata monthly, Emerson, Elo, the Aunalytics standup all read that way), and
+    treating it as internal hid them. But its SUMMARY cannot speak for one account either,
+    because an internal pipeline review names every deal it covered. So only the title does.
+    Measured 10/5/26: "Craig/Team Speed Target Opp Weekly" (a pipeline review) was
+    attributed to tesla, toyota and woven on its summary alone.
+
+    An empty attendee list is a missing list, not a list of colleagues."""
+    if m.get("participants"):
+        return False
+    others = {str(a).strip().lower() for a in (m.get("attendees") or ())}
+    others.discard("")
+    others.discard(OWNER_NAME)
+    return bool(others) and others <= known
+
+
+def meeting_hits(m, toks, ambiguous=frozenset(), known=frozenset()):
+    """The tokens that make Wispr meeting M about the account owning TOKS; empty when it is not.
+
+    The one place the rule lives.
+      * Text: title and summary, except a colleague-only record, which is read by its title.
+      * An industry word alone is no evidence. Elevance Health matched a summary that said
+        "running healthy" because "health" is >4 chars and the match is suffix-tolerant.
+      * A hit needs a token no other account owns (`ambiguous`), unless EVERY non-industry
+        token of the account hit. The second clause keeps toyota = {toyota} matching a Toyota
+        meeting, while woven = {woven, toyota} needs the word "woven".
+    """
+    text = m.get("title") or ""
+    if not colleague_only(m, known):
+        text += " " + (m.get("summary") or "")
+    hay = norm_hay(text)
+    toks = set(toks)
+    hits = {t for t in toks if text_hit(t, hay)} - INDUSTRY
+    if hits - ambiguous or (hits and toks - INDUSTRY <= hits):
+        return hits
+    return set()
+
+
+def meeting_key(m):
+    """First 8 hex chars of a Wispr id: the handle OPP.md notes and findings cite, as in
+    `Wispr 8f107d00`. A record with no usable id gets a stable stand-in, so two of them never
+    share an empty key. Takes a cache record or a wispr_match row."""
+    wid = (m.get("id") or "")[:8].lower()
+    if re.fullmatch(r"[0-9a-f]{8}", wid):
+        return wid
+    seed = f"{m.get('title') or ''}|{m.get('start') or ''}"
+    return hashlib.sha1(seed.encode("utf-8"), usedforsecurity=False).hexdigest()[:8]
+
+
+def wispr_match(recs, toks, since, limit, snip, ambiguous=frozenset()):
+    """Cached meetings about the account that owns TOKS, newest first. `limit` None means all.
+    Rows carry the record's full `id` and `start` beside the columns `evidence` prints."""
     rows = []
     lo = since.strftime("%Y-%m-%d")
     known = wispr_internal_names(recs)
@@ -1523,18 +1616,118 @@ def wispr_match(recs, toks, since, limit, snip):
             continue
         if wispr_is_internal(m, known):
             continue
-        hay = norm_hay((m.get("title") or "") + " " + (m.get("summary") or ""))
-        # Same rule as the calendar path: an industry word alone is not evidence. Without
-        # this, Elevance Health matched a meeting whose summary said "running healthy" —
-        # "health" is >4 chars, so the suffix-tolerant rule let it match "healthy".
-        hits = [t for t in toks if text_hit(t, hay)]
-        if not any(t not in INDUSTRY for t in hits):
+        if not meeting_hits(m, toks, ambiguous, known):
             continue
         rows.append({"date": st[5:], "title": (m.get("title") or "")[:44],
                      "n": len(m.get("attendees") or []),
-                     "summary": " ".join((m.get("summary") or "").split())[:snip]})
-    rows.sort(key=lambda r: r["date"], reverse=True)
+                     "summary": " ".join((m.get("summary") or "").split())[:snip],
+                     "id": m.get("id") or "", "start": m.get("start") or ""})
+    rows.sort(key=lambda r: r["start"], reverse=True)
     return rows[:limit]
+
+
+class Attribution:
+    """Who each Wispr meeting is about, across the whole opp index. Built once per run."""
+
+    def __init__(self, idx, recs):
+        self.known = wispr_internal_names(recs)
+        self.ambiguous = ambiguous_tokens(idx)
+        self.by_id = {m["id"]: m for m in recs if m.get("id")}
+        self._toks = {s: match_tokens(s, _acct(d), d.get("aliases") or ()) for s, d in idx.items()}
+        self._key = {s: _account_key(s, d) for s, d in idx.items()}
+        self._accounts = {}
+
+    def accounts(self, m):
+        """The distinct accounts meeting M is about. An internal meeting is about none."""
+        k = m.get("id") or id(m)
+        if k not in self._accounts:
+            self._accounts[k] = set() if wispr_is_internal(m, self.known) else {
+                self._key[s] for s, t in self._toks.items()
+                if meeting_hits(m, t, self.ambiguous, self.known)}
+        return self._accounts[k]
+
+
+class OppNotes:
+    """<slug>/OPP.md as the opp repo has it, to ask "was this meeting already looked at".
+
+    The working tree is read AND origin/main (`git show`, never a fetch), unioned. The
+    checkout triage runs from can lag the notes a session already merged, and a lagging
+    checkout reads as "not handled" and re-files. A slug with no OPP.md has no handled
+    meetings."""
+
+    def __init__(self):
+        self._text = {}
+        self._has_ref = None
+
+    def _origin_main(self):
+        if self._has_ref is None:
+            try:
+                p = subprocess.run(["git", "-C", REPO, "rev-parse", "--verify", "--quiet", "origin/main"],
+                                   capture_output=True, text=True, timeout=15)
+                self._has_ref = p.returncode == 0
+            except (OSError, subprocess.TimeoutExpired):
+                self._has_ref = False
+        return self._has_ref
+
+    def text(self, slug):
+        if slug not in self._text:
+            parts = []
+            try:
+                with open(os.path.join(REPO, slug, "OPP.md"), encoding="utf-8", errors="replace") as fh:
+                    parts.append(fh.read())
+            except OSError:
+                pass
+            if self._origin_main():
+                try:
+                    p = subprocess.run(["git", "-C", REPO, "show", f"origin/main:./{slug}/OPP.md"],
+                                       capture_output=True, text=True, errors="replace", timeout=15)
+                    if p.returncode == 0:
+                        parts.append(p.stdout)
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+            self._text[slug] = "\n".join(parts)
+        return self._text[slug]
+
+    def cites(self, slug, wid):
+        """Does OPP.md name this meeting? Case-insensitive, whole-word: `Wispr 8f107d00`
+        counts, a longer hex run that merely starts with it does not."""
+        return re.search(r"\b" + re.escape(wid) + r"\b", self.text(slug), re.I) is not None
+
+
+def unrecorded_meetings(rows, slug, attrib, notes):
+    """Of the wispr_match ROWS attributed to SLUG, the ones that still call for a session.
+
+    Dropped: a meeting attributed to PORTFOLIO_ACCOUNTS or more accounts (a pipeline review is
+    not anyone's customer meeting), and one OPP.md already cites (a session looked at it).
+    Both apply to meeting-without-record only; thin-sweep-entry keeps the full list."""
+    out = []
+    for r in rows:
+        m = attrib.by_id.get(r["id"])
+        if m is not None and len(attrib.accounts(m)) >= PORTFOLIO_ACCOUNTS:
+            continue
+        if notes.cites(slug, meeting_key(r)):
+            continue
+        out.append(r)
+    return out
+
+
+def meeting_detail(rows, limit=3):
+    """`Wispr 8f107d00 9/28 <title>` for each of the newest LIMIT rows, joined by `; `."""
+    out = []
+    for r in rows[:limit]:
+        try:
+            d = datetime.strptime(r["start"][:10], "%Y-%m-%d")
+            when = f"{d.month}/{d.day}"
+        except ValueError:
+            when = "?"
+        out.append(f"Wispr {meeting_key(r)} {when}" + (f" {r['title']}" if r["title"] else ""))
+    return "; ".join(out)
+
+
+def detail_evidence(detail):
+    """`detail:<12 hex>`: the evidence key of every finding that has no better one."""
+    norm = " ".join((detail or "").split())
+    return "detail:" + hashlib.sha1(norm.encode("utf-8"), usedforsecurity=False).hexdigest()[:12]
 
 
 def _cmd_wispr_json(a, recs, meta):
@@ -1743,7 +1936,8 @@ def cmd_evidence(a):
     wrecs, wmeta = wispr_load()
     wstate = wispr_state(wrecs, wmeta)
     wispr_rows = ([] if wstate in ("off", "absent")
-                  else wispr_match(wrecs, toks, since, a.limit, 400 if a.full else 190))
+                  else wispr_match(wrecs, toks, since, a.limit, 400 if a.full else 190,
+                                   ambiguous=ambiguous_tokens(idx)))
     wwarn = wispr_line(wrecs, wmeta, hi)
 
     n = (len(cal_rows) + len(zoom_rows) + len(mail_rows) + len(repo_rows) + len(wispr_rows))
@@ -2245,8 +2439,9 @@ def cmd_triage(a):
     deep_done = set()
 
     seen = set()
+    attrib = notes = None      # built on the first opp that earns a Wispr look
 
-    def add(pid, slug, why, detail):
+    def add(pid, slug, why, detail, evidence=None):
         # An account with several open opps is scanned once per opp; the finding is about the
         # account, so emit it once. Without this, a multi-opp account reported twice.
         if (pid, slug) in seen:
@@ -2276,9 +2471,13 @@ def cmd_triage(a):
         # None of the constraints survived. `why` and `detail` stay bounded because
         # they are generated strings that can run long; `work` is hand-written policy
         # whose length is deliberate.
+        #
+        # `evidence` is what the finding is ABOUT, so _push_to_inbox can tell "the same
+        # thing, already handled" from "something new for the same account". The
+        # meeting pattern names the meetings; every other pattern hashes its detail.
         findings.append({"pattern": pid, "slug": slug, "priority": p.get("priority", 3),
                          "why": why, "work": " ".join((p.get("work") or "").split()),
-                         "detail": detail})
+                         "detail": detail, "evidence": evidence or detail_evidence(detail)})
 
     for r in recs:
         scanned += 1
@@ -2356,17 +2555,28 @@ def cmd_triage(a):
         touched = repo_touched_since(slug, since)
 
         wrecs, wmeta = wispr_load()
+        if attrib is None:
+            attrib, notes = Attribution(idx, wrecs), OppNotes()
         toks = match_tokens(slug, _acct(idx.get(slug, {})), (idx.get(slug) or {}).get("aliases") or ())
-        meetings = wispr_match(wrecs, toks, since, 5, 90) if toks else []
+        found = wispr_match(wrecs, toks, since, None, 90, ambiguous=attrib.ambiguous) if toks else []
+        # thin-sweep-entry counts the newest five, as it always did.
+        meetings = found[:5]
         # A meeting matches the ACCOUNT, so the entry that answers it may sit on any of the
         # account's opps. `d` is this opp's alone: loves has five open opps and one of
         # them carries the 10/1/26 entry, so the empty and April ones re-fired this every
         # night after the entry was written (measured 10/2/26).
         acct_d = latest_entry.get(slug)
-        if meetings and (not acct_d or acct_d < since):
-            add("meeting-without-record", slug,
-                f"{len(meetings)} meeting(s) since {since} with no SE Activity entry after them",
-                meetings[0]["title"][:70])
+        if found and (not acct_d or acct_d < since):
+            # What meeting-without-record is about is narrower than what the account met
+            # about: a pipeline review naming three accounts is nobody's customer meeting,
+            # and a meeting OPP.md already cites by id was looked at. Asked only here, so
+            # the OPP.md reads happen for accounts that could actually file.
+            unrecorded = unrecorded_meetings(found, slug, attrib, notes)
+            if unrecorded:
+                add("meeting-without-record", slug,
+                    f"{len(unrecorded)} meeting(s) since {since} with no SE Activity entry after them",
+                    meeting_detail(unrecorded),
+                    "wispr:" + ",".join(sorted({meeting_key(r) for r in unrecorded})))
 
         if thin:
             sig = len(touched) + len(meetings)
@@ -2416,6 +2626,81 @@ def cmd_triage(a):
             return rc
 
 
+# ── the inbox: what is open, and what was already handled ─────────────────────
+#
+# A finding is skipped when an item for the same (pattern, slug) is still OPEN, or when a
+# DONE item from the last 7 days carries the same evidence. Without the second half, a
+# session that closes an item without changing the signal (the woven sessions: "match
+# rejected", no SE Activity, nothing to write) is followed 30 minutes later by the same
+# finding. Measured 10/3/26: woven filed at 20:53Z, 21:38Z and 22:08Z.
+OPEN_STATUSES = ("new", "routing", "routed", "working", "needs-input")
+HANDLED_HOURS = 168         # how far back a done item counts as "already handled"
+INBOX_CAP = 500             # `dispatch ls --limit` ceiling
+_FINDING_HEAD = re.compile(r"\s*\[([a-z-]+)\]\s*([a-z0-9-]+):")
+_EVIDENCE_TAG = re.compile(r"\s\[evidence:([^\]\s]+)\]\s*$")
+
+
+def _dispatch_items(cli, *flags):
+    """Items from `dispatch ls <flags> --limit 500 --full --output json`, or None when the
+    inbox could not be read. JSON is the server's own bytes; the TOON table it replaces was
+    parsed with a regex that a comma in a body could break."""
+    p = _run([cli, "ls", *flags, "--limit", str(INBOX_CAP), "--full", "--output", "json"], timeout=60)
+    if p.returncode != 0:
+        return None
+    try:
+        data = json.loads(p.stdout or "")
+    except json.JSONDecodeError:
+        return None
+    items = data.get("items") if isinstance(data, dict) else data
+    return [i for i in items if isinstance(i, dict)] if isinstance(items, list) else None
+
+
+def _legacy_details(f):
+    """What the code before evidence tags put in the trailing `(...)` of this finding's body.
+
+    For meeting-without-record that was the newest meeting's title cut to 44 characters (the
+    row title), so it is read back out of the first `Wispr <id> <M/D> <title>` entry. Every
+    other pattern wrote its detail unchanged. Items closed before this shipped carry no
+    evidence tag; matching on this keeps them from being re-filed once more."""
+    detail = f.get("detail") or ""
+    if f.get("pattern") == "meeting-without-record":
+        m = re.match(r"Wispr [0-9a-f]{8} \S+ (.*?)(?:; Wispr [0-9a-f]{8} |$)", detail, re.S)
+        if m:
+            return {t for t in (m.group(1)[:44], m.group(1)[:70], m.group(1).rstrip()) if t}
+    return {detail} if detail else set()
+
+
+def _handled(f, evidence, done_bodies):
+    """Is there a done item (BODIES, all the same pattern and slug) for this evidence?"""
+    legacy = _legacy_details(f)
+    for body in done_bodies:
+        tag = _EVIDENCE_TAG.search(body)
+        if tag:
+            if tag.group(1) == evidence:
+                return True
+        elif any(body.rstrip().endswith(f"({d})") for d in legacy):
+            return True
+    return False
+
+
+def _parse_ts(text):
+    """An RFC 3339 stamp as an aware datetime. dispatch trims trailing zeros off the fraction
+    (`19.93Z`, `19.9Z`, none at all), which `fromisoformat` only accepts from Python 3.11."""
+    s = re.sub(r"\.(\d+)", lambda m: "." + m.group(1).ljust(6, "0")[:6],
+               str(text).strip().replace("Z", "+00:00"), count=1)
+    ts = datetime.fromisoformat(s)
+    return ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+
+
+def _created_within(item, hours):
+    """Was the item created in the last HOURS? An unreadable timestamp counts as inside: the
+    server already filtered on --since, and a duplicate outlives a missed finding."""
+    try:
+        return datetime.now(timezone.utc) - _parse_ts(item["created_at"]) <= timedelta(hours=hours)
+    except (KeyError, ValueError, TypeError):
+        return True
+
+
 def _push_to_inbox(findings):
     """Hand findings to the dispatch inbox. Each becomes one item, carrying its reasoning so the
     morning report can say WHY without re-deriving it."""
@@ -2429,18 +2714,8 @@ def _push_to_inbox(findings):
     # board: "There are so many failed in flight issues... I can't imagine all the
     # backlog items actually failed." They had not failed. They were the same four
     # things, four times, and the noise made the board unreadable.
-    open_keys = set()
-    seen = _run([cli, "ls", "--limit", "300", "--full"], timeout=60)
-    if seen.returncode == 0:
-        for line in (seen.stdout or "").split("\n"):
-            m = re.match(r"\s+[0-9A-HJKMNP-TV-Z]{26},([a-z-]+),[^,]*,(.*)", line)
-            # An item Craig has finished with is not a reason to stay silent if the
-            # signal fires again -- only something still OPEN is.
-            if m and m.group(1) in ("new", "routed", "working", "needs-input"):
-                t = re.match(r'"?\[([a-z-]+)\]\s*([a-z0-9-]+):', m.group(2).strip())
-                if t:
-                    open_keys.add((t.group(1), t.group(2)))
-    else:
+    recent = _dispatch_items(cli, "--since", f"{HANDLED_HOURS}h")
+    if recent is None:
         # Could not read the inbox. File nothing rather than risk another round of
         # duplicates: a missed finding reappears tomorrow, a duplicate never leaves.
         #
@@ -2454,19 +2729,56 @@ def _push_to_inbox(findings):
         print("  (could not read the inbox — not queueing, to avoid duplicates)",
               file=sys.stderr)
         return E_PARTIAL
+    if len(recent) >= INBOX_CAP:
+        print(f"  (inbox read hit the {INBOX_CAP}-item cap — older handled items may be missing)",
+              file=sys.stderr)
+    # The window above is by creation date, so an item that is STILL OPEN after a week is
+    # not in it, and a duplicate would be filed every half hour for as long as it stays
+    # stuck. Measured 10/5/26: the live inbox held a `working` item 17 days old and a
+    # `routed` one 30 days old, both invisible to the 168h read. Ask for the open ones by
+    # status as well. (`routing` is left out of the filter: this daemon answers
+    # invalid_status to it. An item in that state is still read as open when it shows up.)
+    # Best effort: the call above is the one that must succeed.
+    older = _dispatch_items(cli, *(a for s in ("new", "routed", "working", "needs-input")
+                                   for a in ("--status", s)))
+    if older is None:
+        print("  (could not list open items older than 7d — a stale open duplicate may be missed)",
+              file=sys.stderr)
+        older = []
 
-    ok = dup = 0
+    open_keys, done = set(), {}
+    for it in older + recent:
+        head = _FINDING_HEAD.match(str(it.get("body") or ""))
+        if not head:
+            continue
+        key = (head.group(1), head.group(2))
+        status = it.get("status")
+        # An item Craig has finished with is not a reason to stay silent when the signal
+        # is NEW. Only something still open silences the pattern outright; a done item
+        # silences it for the same evidence alone. `failed` silences nothing.
+        if status in OPEN_STATUSES:
+            open_keys.add(key)
+        elif status == "done" and _created_within(it, HANDLED_HOURS):
+            done.setdefault(key, []).append(str(it["body"]))
+
+    ok = dup = handled = 0
     for f in findings:
-        if (f["pattern"], f["slug"]) in open_keys:
+        key = (f["pattern"], f["slug"])
+        evidence = f.get("evidence") or detail_evidence(f.get("detail"))
+        if key in open_keys:
             dup += 1
             continue
+        if _handled(f, evidence, done.get(key, ())):
+            handled += 1
+            continue
         body = (f"[{f['pattern']}] {f['slug']}: {f['why']}. {f['work']}"
-                + (f" ({f['detail']})" if f["detail"] else ""))
+                + (f" ({f['detail']})" if f["detail"] else "")
+                + f" [evidence:{evidence}]")
         p = _run([cli, "add", body], timeout=60)
         if p.returncode == 0:
             ok += 1
-    print(f"\nqueued:{ok}/{len(findings)} to the inbox"
-          + (f" ({dup} already open)" if dup else ""))
+    print(f"\nqueued:{ok}/{len(findings)} to the inbox "
+          f"({dup} already open, {handled} already handled in the last 7d)")
     # Queueing nothing because everything is ALREADY OPEN is a real, healthy outcome
     # and stays 0. Only an unreadable inbox is a failure.
     return E_OK

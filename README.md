@@ -79,7 +79,7 @@ there are five should say so.
 |---|---|---|
 | `OPP_REPO` | `~/code/customer-opportunities` | the opp folders |
 | `SF_ORG` | `spectrocloud` | `sf` org alias |
-| `OPP_SE` | `CraigSmith` | SE assignment filter |
+| `OPP_SE` | `CraigSmith` | SE assignment filter. Also the owner's name in Wispr attendee lists (`CraigSmith` is read as `craig smith`), which `triage` leaves out when it asks who else was on a call |
 | `OPP_INITIALS` | `CS` | stamped on SE Activity entries |
 | `OPP_WISPR` | `on` | `off` declares Wispr out of scope |
 | `OPP_WISPR_DIR` | `~/.cache/opp-axi/wispr` | meeting cache (outside the repo: verbatim customer speech) |
@@ -168,6 +168,49 @@ opp-axi doctor               # what is configured, what is not
 opp-axi brief <ref>          # a budgeted slice of OPP.md, not the whole file
 opp-axi log <ref> "text"     # append a dated Log entry without reading the file
 ```
+
+## Triage
+
+`triage` turns signals into proposed work using the rules in `patterns.yaml`, and
+`triage --push` files each finding as a `dispatch` item. Two parts of that need to be
+exact, because a wrong answer files a routed session against the wrong account or files
+the same thing every half hour.
+
+**Whose meeting is it.** `meeting-without-record` and `evidence` attribute a cached Wispr
+meeting to an account by matching the account's name tokens against the title and summary.
+
+- A word that two or more *different* accounts own is not evidence for any one of them.
+  "toyota" is in Toyota North America, Toyota Material Handling and Woven by Toyota, so a
+  Toyota call matches `toyota` only. An account still matches when every one of its
+  non-industry tokens hit, which is why `toyota` (one token) keeps its own meetings while
+  `woven` needs the word "woven". Two slugs of one account count as one owner.
+- A record with no `participants` whose attendees, Craig aside, are all colleagues seen on
+  a Spectro invite elsewhere in the cache is read by its title only. Its summary cannot
+  speak for one account: an internal pipeline review names every deal it covered. It is
+  still attributed when the title names the account ("Aunalytics standup"), so customer
+  calls with a colleague-only attendee list keep working.
+- `meeting-without-record` then drops a meeting that is still about three or more accounts
+  (a pipeline review), and one the account's `OPP.md` already cites by id. Citing means
+  writing `Wispr 8f107d00` (the first 8 hex chars) anywhere in `<slug>/OPP.md`. The working
+  tree and `origin/main` are both read, because the checkout can lag. `thin-sweep-entry`
+  keeps the full attributed list.
+
+Each finding carries an `evidence` key (in `--json`, and as a trailing ` [evidence:<key>]`
+on the pushed item). For `meeting-without-record` it is `wispr:<sorted id8s>` of the meetings
+that remain, and `detail` lists up to three as `Wispr <id8> <M/D> <title>`. For every other
+pattern it is `detail:<12 hex of sha1 of the whitespace-normalised detail>`.
+
+**What `--push` skips.** The inbox is read as `dispatch ls --since 168h --limit 500 --full
+--output json`, plus a by-status read for items still open after a week. A finding is skipped
+when an item for the same pattern and slug is open (`new`, `routing`, `routed`, `working`,
+`needs-input`), or when a `done` item from the last 7 days carries the same evidence. A
+`failed` item never blocks a re-file. Items closed before evidence tags existed match on the
+trailing `(...)` the old code wrote. An unreadable inbox still refuses with exit 5 and files
+nothing. The run ends with
+`queued:N/M to the inbox (X already open, Y already handled in the last 7d)`.
+
+To close a meeting finding for good without writing Salesforce, log it with
+`opp-axi log <slug> "... Wispr <id8> ..."`.
 
 ## Customer folders
 
